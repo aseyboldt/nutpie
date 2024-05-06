@@ -11,7 +11,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from nutpie import _lib
-from nutpie.sample import CompiledModel
+from nutpie.sampling import CompiledModel
 
 try:
     from numba.extending import intrinsic
