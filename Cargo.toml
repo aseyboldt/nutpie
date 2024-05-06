@@ -2,8 +2,8 @@
 name = "nutpie"
 version = "0.10.0"
 authors = [
-    "Adrian Seyboldt <adrian.seyboldt@gmail.com>",
-    "PyMC Developers <pymc.devs@gmail.com>"
+  "Adrian Seyboldt <adrian.seyboldt@gmail.com>",
+  "PyMC Developers <pymc.devs@gmail.com>",
 ]
 edition = "2021"
 license = "MIT"
@@ -13,8 +13,11 @@ description = "Python wrapper for nuts-rs -- a NUTS sampler written in Rust."
 
 [features]
 extension-module = ["pyo3/extension-module"]
-default = ["extension-module"]
+default = ["extension-module", "onnx"]
 simd_support = ["nuts-rs/simd_support"]
+iree = ["dep:eerie"]
+torch = ["dep:tch"]
+onnx = ["dep:ort"]
 
 [lib]
 name = "_lib"
@@ -36,6 +39,15 @@ rand_distr = "0.4.3"
 smallvec = "1.11.0"
 upon = { version = "0.8.1", default-features = false, features = [] }
 time-humanize = { version = "0.1.3", default-features = false }
+eerie = { version = "0.2.2", optional = true, default-features = false, features = [
+  "std",
+  "runtime",
+] }
+tch = { version = "0.16.0", optional = true }
+ort = { version = "2.0.0-rc.2", optional = true, features = [
+  "cuda",
+  "load-dynamic",
+] }
 
 [dependencies.pyo3]
 version = "0.21.0"
