@@ -4,8 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [0.12.0] - 2024-06-29
 
-### Features
-
 - Add pyfunc backend (Adrian Seyboldt)
 
 - Add python code for pyfunc backend (Adrian Seyboldt)

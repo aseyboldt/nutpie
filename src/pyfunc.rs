@@ -73,6 +73,7 @@ impl PyVariable {
 pub struct PyModel {
     make_logp_func: Py<PyAny>,
     make_expand_func: Py<PyAny>,
+    init_point_func: Option<Py<PyAny>>,
     variables: Vec<PyVariable>,
     ndim: usize,
 }
@@ -85,10 +86,12 @@ impl PyModel {
         make_expand_func: Py<PyAny>,
         variables: Vec<PyVariable>,
         ndim: usize,
+        init_point_func: Option<Py<PyAny>>,
     ) -> Self {
         Self {
             make_logp_func,
             make_expand_func,
+            init_point_func,
             variables,
             ndim,
         }
@@ -303,11 +306,11 @@ impl ExpandDtype {
     #[getter]
     fn shape(&self) -> Option<Vec<usize>> {
         match self {
-            Self::BooleanArray {tensor_type} => { Some(tensor_type.shape.iter().cloned().collect()) },
-            Self::ArrayFloat64 {tensor_type} => { Some(tensor_type.shape.iter().cloned().collect()) },
-            Self::ArrayFloat32 {tensor_type} => { Some(tensor_type.shape.iter().cloned().collect()) },
-            Self::ArrayInt64 {tensor_type} => { Some(tensor_type.shape.iter().cloned().collect()) },
-            _ => { None },
+            Self::BooleanArray { tensor_type } => Some(tensor_type.shape.iter().cloned().collect()),
+            Self::ArrayFloat64 { tensor_type } => Some(tensor_type.shape.iter().cloned().collect()),
+            Self::ArrayFloat32 { tensor_type } => Some(tensor_type.shape.iter().cloned().collect()),
+            Self::ArrayInt64 { tensor_type } => Some(tensor_type.shape.iter().cloned().collect()),
+            _ => None,
         }
     }
 }
@@ -437,11 +440,13 @@ impl DrawStorage for PyTrace {
 }
 
 impl Model for PyModel {
-    type Math<'model> = CpuMath<PyDensity>
+    type Math<'model>
+        = CpuMath<PyDensity>
     where
         Self: 'model;
 
-    type DrawStorage<'model, S: nuts_rs::Settings> = PyTrace
+    type DrawStorage<'model, S: nuts_rs::Settings>
+        = PyTrace
     where
         Self: 'model;
 
@@ -474,6 +479,33 @@ impl Model for PyModel {
         rng: &mut R,
         position: &mut [f64],
     ) -> Result<()> {
+        if let Some(init_func) = &self.init_point_func {
+            let seed = rng.next_u64();
+            Python::with_gil(|py| -> Result<()> {
+                let random = py.import_bound("numpy.random")?;
+                let rng = random.call_method1("default_rng", (seed,))?;
+                // TODO: pass chain id here too once nuts-rs threads it through Model::init_position
+                let point: PyReadonlyArray1<f64> = init_func
+                    .call1(py, (rng,))?
+                    .extract(py)
+                    .context("init_point_func must return a one-dimensional float64 array")?;
+                let point = point
+                    .as_slice()
+                    .context("init_point_func must return a contiguous float64 array")?;
+                if point.len() != position.len() {
+                    bail!(
+                        "init_point_func returned {} values, expected {}",
+                        point.len(),
+                        position.len()
+                    );
+                }
+                position.copy_from_slice(point);
+                Ok(())
+            })
+            .context("Failed to call init_point_func")?;
+            return Ok(());
+        }
+
         let dist = StandardNormal;
         dist.sample_iter(rng)
             .zip(position.iter_mut())

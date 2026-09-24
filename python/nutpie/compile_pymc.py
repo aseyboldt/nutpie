@@ -50,6 +50,7 @@ class CompiledPyMCModel(CompiledModel):
     shape_info: Any
     logp_func: Any
     expand_func: Any
+    initial_point_fn: Any
     _n_dim: int
     _shapes: dict[str, tuple[int, ...]]
     _coords: Optional[dict[str, Any]]
@@ -121,6 +122,7 @@ class CompiledPyMCModel(CompiledModel):
             var_sizes,
             self.shape_info[0],
             init_mean,
+            self.initial_point_fn,
         )
 
 
@@ -220,6 +222,7 @@ def _compile_pymc_model_numba(model: "pm.Model", **kwargs) -> CompiledPyMCModel:
         expand_numba = numba.cfunc(c_sig_expand, **kwargs)(expand_numba_raw)
 
     dims, coords = _prepare_dims_and_coords(model, shape_info)
+    initial_point_fn = _make_initial_point_wrapper(model)
 
     return CompiledPyMCModel(
         _n_dim=n_dim,
@@ -234,6 +237,7 @@ def _compile_pymc_model_numba(model: "pm.Model", **kwargs) -> CompiledPyMCModel:
         shape_info=shape_info,
         logp_func=logp_fn_pt,
         expand_func=expand_fn_pt,
+        initial_point_fn=initial_point_fn,
     )
 
 
@@ -324,7 +328,7 @@ def _compile_pymc_model_jax(model, *, gradient_backend=None, **kwargs):
 
         return logp
 
-    names, slices, shapes = shape_info
+    names, _slices, shapes = shape_info
     dtypes = [np.float64] * len(names)
 
     def make_expand_func(seed1, seed2, chain):
@@ -341,6 +345,7 @@ def _compile_pymc_model_jax(model, *, gradient_backend=None, **kwargs):
         return expand
 
     dims, coords = _prepare_dims_and_coords(model, shape_info)
+    initial_point_fn = _make_initial_point_wrapper(model)
 
     return from_pyfunc(
         n_dim,
@@ -349,6 +354,7 @@ def _compile_pymc_model_jax(model, *, gradient_backend=None, **kwargs):
         dtypes,
         shapes,
         names,
+        make_initial_point_fn=initial_point_fn,
         shared_data=shared_data,
         dims=dims,
         coords=coords,
@@ -428,6 +434,33 @@ def _compute_shapes(model):
         on_unused_input="ignore",
     )
     return dict(zip(trace_vars.keys(), shape_func()))
+
+
+def _make_initial_point_wrapper(model):
+    from pymc.initial_point import make_initial_point_fn
+
+    point_fn = make_initial_point_fn(model=model, return_transformed=True)
+    value_names = [model.rvs_to_values[var].name for var in model.free_RVs]
+
+    def wrapped(rng: np.random.Generator) -> np.ndarray:
+        """Adapt PyMC's seed-based initializer to ``wrapped(rng)``.
+
+        A positional ``chain: int`` argument will be added in a future release
+        once nuts-rs passes chain ids through ``Model::init_position``.
+        """
+
+        seed = int(rng.integers(0, np.iinfo(np.int64).max))
+        point = point_fn(seed)
+        if not value_names:
+            return np.empty(0, dtype=np.float64)
+        return np.concatenate(
+            [
+                np.asarray(point[name], dtype=np.float64, order="C").ravel()
+                for name in value_names
+            ]
+        )
+
+    return wrapped
 
 
 def _make_functions(model, *, mode, compute_grad, join_expanded):
