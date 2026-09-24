@@ -8,11 +8,14 @@ import numpy as np
 from nutpie import _lib
 from nutpie.sample import CompiledModel
 
+InitPointFn = Callable[[np.random.Generator], np.ndarray]
+
 
 @dataclass(frozen=True)
 class PyFuncModel(CompiledModel):
     _make_logp_func: Callable
     _make_expand_func: Callable
+    _make_initial_point_fn: InitPointFn | None
     _shared_data: dict[str, Any]
     _n_dim: int
     _variables: list[_lib.PyVariable]
@@ -39,6 +42,16 @@ class PyFuncModel(CompiledModel):
         updated.update(**updates)
         return dataclasses.replace(self, _shared_data=updated)
 
+    def with_init_point_fn(self, fn: InitPointFn):
+        """Return a copy that uses ``fn(rng)`` to initialize each chain.
+
+        ``rng`` is a ``numpy.random.Generator``. A positional ``chain: int``
+        argument will be added in a future release once nuts-rs passes chain ids
+        through ``Model::init_position``.
+        """
+
+        return dataclasses.replace(self, _make_initial_point_fn=fn)
+
     def _make_sampler(self, settings, init_mean, cores, progress_type):
         model = self._make_model(init_mean)
         return _lib.PySampler.from_pyfunc(
@@ -62,6 +75,7 @@ class PyFuncModel(CompiledModel):
             make_expand_func,
             self._variables,
             self.n_dim,
+            self._make_initial_point_fn,
         )
 
 
@@ -74,10 +88,23 @@ def from_pyfunc(
     expanded_names: list[str],
     *,
     initial_mean: np.ndarray | None = None,
+    make_initial_point_fn: InitPointFn | None = None,
     coords: dict[str, Any] | None = None,
     dims: dict[str, tuple[str, ...]] | None = None,
     shared_data: dict[str, Any] | None = None,
 ):
+    """Build a compiled pyfunc model.
+
+    Parameters
+    ----------
+    make_initial_point_fn
+        Optional callback used to initialize each chain as
+        ``make_initial_point_fn(rng)`` where ``rng`` is a
+        ``numpy.random.Generator``. A positional ``chain: int`` argument will
+        be added in a future release once nuts-rs passes chain ids through
+        ``Model::init_position``.
+    """
+
     variables = []
     for name, shape, dtype in zip(
         expanded_names, expanded_shapes, expanded_dtypes, strict=True
@@ -106,6 +133,7 @@ def from_pyfunc(
         _coords=coords,
         _make_logp_func=make_logp_fn,
         _make_expand_func=make_expand_fn,
+        _make_initial_point_fn=make_initial_point_fn,
         _variables=variables,
         _shared_data=shared_data,
     )

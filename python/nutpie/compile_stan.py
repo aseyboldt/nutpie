@@ -3,7 +3,7 @@ import tempfile
 from dataclasses import dataclass, replace
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -11,6 +11,8 @@ from numpy.typing import NDArray
 
 from nutpie import _lib
 from nutpie.sample import CompiledModel
+
+InitPointFn = Callable[[np.random.Generator], np.ndarray]
 
 
 class _NumpyArrayEncoder(json.JSONEncoder):
@@ -23,6 +25,7 @@ class _NumpyArrayEncoder(json.JSONEncoder):
 @dataclass(frozen=True)
 class CompiledStanModel(CompiledModel):
     _coords: Optional[dict[str, Any]]
+    _init_point_fn: InitPointFn | None
     code: str
     data: Optional[dict[str, NDArray]]
     library: Any
@@ -42,7 +45,7 @@ class CompiledStanModel(CompiledModel):
         else:
             data_json = None
 
-        model = _lib.StanModel(self.library, seed, data_json)
+        model = _lib.StanModel(self.library, seed, data_json, self._init_point_fn)
         coords = self._coords
         if coords is None:
             coords = {}
@@ -52,6 +55,7 @@ class CompiledStanModel(CompiledModel):
 
         return CompiledStanModel(
             _coords=coords,
+            _init_point_fn=self._init_point_fn,
             data=data,
             code=self.code,
             library=self.library,
@@ -74,6 +78,16 @@ class CompiledStanModel(CompiledModel):
             dims_new = self.dims.copy()
         dims_new.update(dims)
         return replace(self, dims=dims_new)
+
+    def with_init_point_fn(self, fn: InitPointFn):
+        """Return a copy that uses ``fn(rng)`` to initialize each chain.
+
+        ``rng`` is a ``numpy.random.Generator``. A positional ``chain: int``
+        argument will be added in a future release once nuts-rs passes chain ids
+        through ``Model::init_position``.
+        """
+
+        return replace(self, _init_point_fn=fn, model=None)
 
     def _make_model(self, init_mean):
         if self.model is None:
@@ -177,6 +191,7 @@ def compile_stan_model(
         library=library,
         dims=dims,
         _coords=coords,
+        _init_point_fn=None,
         model_name=model_name,
         model=None,
         data=None,
