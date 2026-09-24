@@ -4,12 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [0.12.0] - 2024-06-29
 
-### Features
-
-- Add ``with_init_point_fn`` callbacks for the pyfunc and Stan backends, and adapt PyMC-generated initial points to the new RNG-based callback convention (Adrian Seyboldt)
-
-- Expose Stan ``unconstrain``, ``unconstrain_json``, and ``param_constrain`` helpers for constrained/unconstrained parameter mapping (Adrian Seyboldt)
-
 - Add pyfunc backend (Adrian Seyboldt)
 
 - Add python code for pyfunc backend (Adrian Seyboldt)
