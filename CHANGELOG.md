@@ -10,8 +10,6 @@ All notable changes to this project will be documented in this file.
 
 - Expose Stan ``unconstrain``, ``unconstrain_json``, and ``param_constrain`` helpers for constrained/unconstrained parameter mapping (Adrian Seyboldt)
 
-### Features
-
 - Add pyfunc backend (Adrian Seyboldt)
 
 - Add python code for pyfunc backend (Adrian Seyboldt)
