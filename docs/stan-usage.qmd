@@ -228,3 +228,45 @@ sns.catplot(
     showfliers=False,
 )
 ```
+
+## Custom Initial Points
+
+By default, `nutpie` initializes each chain of a Stan model with values drawn
+from a standard normal distribution in the unconstrained parameter space. You
+can override this by providing a function that computes the initial,
+unconstrained point for a chain given an integer seed:
+
+```{python}
+model_code = """
+data {}
+parameters {
+    real<lower=0> sigma;
+}
+model {
+    sigma ~ lognormal(0, 1);
+}
+"""
+
+compiled_model = nutpie.compile_stan_model(code=model_code).with_data()
+
+
+def init_point_fn(seed):
+    rng = np.random.default_rng(seed)
+    sigma_val = float(rng.lognormal())
+    return np.asarray(compiled_model.model.unconstrain_json(f'{{"sigma": {sigma_val}}}'))
+
+
+compiled_model = compiled_model.with_init_point_fn(init_point_fn)
+trace = nutpie.sample(compiled_model, seed=0)
+```
+
+This example also shows `unconstrain_json`, one of a few helper methods
+available on `compiled_model.model` for converting between the constrained and
+unconstrained parameterizations of a model:
+
+- `unconstrain(theta)` converts an array of constrained parameter values to
+  the unconstrained space.
+- `unconstrain_json(json_str)` does the same, but takes a JSON string (in the
+  format used by Stan's `data` blocks) instead of an array.
+- `param_constrain(theta)` converts an unconstrained array back to the
+  constrained space.

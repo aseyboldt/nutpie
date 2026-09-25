@@ -192,3 +192,30 @@ After compilation, we can change the dataset:
 compiled2 = compiled.with_data(x=[4, 5, 6])
 trace2 = nutpie.sample(compiled2)
 ```
+
+## Custom Initial Points
+
+By default, `nutpie` initializes each chain using PyMC's own initial point
+strategy (`support_point` or `prior`, see `default_initialization_strategy`
+above). You can override this by providing a function that computes the
+initial, unconstrained point for a chain given an integer seed:
+
+```{python}
+import numpy as np
+
+compiled = nutpie.compile_pymc_model(model)
+
+
+def init_point_fn(seed):
+    rng = np.random.default_rng(seed)
+    return rng.normal(size=compiled.n_dim)
+
+
+compiled = compiled.with_init_point_fn(init_point_fn)
+trace = nutpie.sample(compiled)
+```
+
+Calling `with_init_point_fn` again replaces any previously configured
+callback (including the default one), it never combines with it. This
+behaves the same way for all backends (PyMC, Stan and custom `from_pyfunc`
+models).

@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{ffi::CString, path::PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bridgestan::open_library;
 use itertools::Itertools;
+use numpy::PyReadonlyArray1;
 use nuts_rs::{CpuLogpFunc, CpuMath, HasDims, LogpError, Model, Storable, Value};
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::{PyDict, PyNone, PyTuple};
+use pyo3::types::{PyAnyMethods, PyDict, PyNone, PyTuple};
 use pyo3::{exceptions::PyValueError, pyclass, pymethods, PyResult};
 use pyo3::{prelude::*, BoundObject};
 use rand::prelude::Distribution;
@@ -87,6 +88,7 @@ pub struct StanModel {
     #[pyo3(get)]
     dims: HashMap<String, Vec<String>>,
     unc_names: Value,
+    init_point_func: Option<Arc<Py<PyAny>>>,
 }
 
 /// Return meta information about the constrained parameters of the model
@@ -252,7 +254,7 @@ where
 #[pymethods]
 impl StanModel {
     #[new]
-    #[pyo3(signature = (lib, dim_sizes, dims, coords, seed=None, data=None, transform_adapter=None))]
+    #[pyo3(signature = (lib, dim_sizes, dims, coords, seed=None, data=None, transform_adapter=None, init_point_func=None))]
     pub fn new(
         py: Python<'_>,
         lib: StanLibrary,
@@ -262,6 +264,7 @@ impl StanModel {
         seed: Option<u32>,
         data: Option<String>,
         transform_adapter: Option<Py<PyAny>>,
+        init_point_func: Option<Py<PyAny>>,
     ) -> anyhow::Result<Self> {
         let mut dim_sizes = dim_sizes
             .bind(py)
@@ -331,6 +334,7 @@ impl StanModel {
             coords,
             dims,
             unc_names,
+            init_point_func: init_point_func.map(Arc::new),
         })
     }
 
@@ -347,6 +351,34 @@ impl StanModel {
 
     pub fn ndim(&self) -> usize {
         self.inner.param_unc_num()
+    }
+
+    pub fn unconstrain(&self, theta: PyReadonlyArray1<'_, f64>) -> anyhow::Result<Vec<f64>> {
+        let theta = theta.as_slice()?;
+        let mut out = vec![0f64; self.inner.param_unc_num()];
+        self.inner
+            .param_unconstrain(theta, &mut out)
+            .context("Failed to unconstrain parameters")?;
+        Ok(out)
+    }
+
+    pub fn unconstrain_json(&self, json: &str) -> anyhow::Result<Vec<f64>> {
+        let json = CString::new(json)?;
+        let mut out = vec![0f64; self.inner.param_unc_num()];
+        self.inner
+            .param_unconstrain_json(json.as_c_str(), &mut out)
+            .context("Failed to unconstrain parameters from json")?;
+        Ok(out)
+    }
+
+    pub fn param_constrain(&self, theta: PyReadonlyArray1<'_, f64>) -> anyhow::Result<Vec<f64>> {
+        let theta = theta.as_slice()?;
+        let mut out = vec![0f64; self.inner.param_num(false, false)];
+        let mut model_rng = self.inner.new_rng(rng().next_u32())?;
+        self.inner
+            .param_constrain(theta, false, false, &mut out, Some(&mut model_rng))
+            .context("Failed to constrain parameters")?;
+        Ok(out)
     }
 
     /*
@@ -800,10 +832,36 @@ impl Model for StanModel {
         rng: &mut R,
         position: &mut [f64],
     ) -> anyhow::Result<()> {
-        let dist = StandardNormal;
-        dist.sample_iter(rng)
-            .zip(position.iter_mut())
-            .for_each(|(val, pos)| *pos = val);
+        let Some(init_point_func) = self.init_point_func.as_ref() else {
+            let dist = StandardNormal;
+            dist.sample_iter(rng)
+                .zip(position.iter_mut())
+                .for_each(|(val, pos)| *pos = val);
+            return Ok(());
+        };
+
+        let seed = rng.next_u64();
+
+        Python::attach(|py| {
+            let init_point = init_point_func
+                .call1(py, (seed,))
+                .context("Failed to initialize point")?;
+
+            let init_point: PyReadonlyArray1<f64> = init_point
+                .extract(py)
+                .map_err(|_| anyhow!("Initialization array returned incorrect argument"))?;
+
+            let init_point = init_point
+                .as_slice()
+                .context("Initial point must be contiguous")?;
+
+            if init_point.len() != position.len() {
+                bail!("Initial point has incorrect length");
+            }
+
+            position.copy_from_slice(init_point);
+            Ok(())
+        })?;
         Ok(())
     }
 }

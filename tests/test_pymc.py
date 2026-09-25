@@ -650,3 +650,71 @@ def test_unnamed_shared(backend, gradient_backend):
 
     compiled = nutpie.compile_pymc_model(model)
     nutpie.sample(compiled)
+
+
+@pytest.mark.pymc
+@parameterize_backends
+def test_pymc_with_init_point_fn(backend, gradient_backend):
+    with pm.Model() as model:
+        pm.Normal("a")
+        pm.Normal("b")
+
+    compiled = nutpie.compile_pymc_model(
+        model, backend=backend, gradient_backend=gradient_backend
+    )
+    expected = np.array([0.25, -0.75])
+    seen = []
+
+    def init_point_fn(seed):
+        point = expected.copy()
+        seen.append(point)
+        return point
+
+    compiled = compiled.with_init_point_fn(init_point_fn)
+    nutpie.sample(
+        compiled,
+        chains=2,
+        draws=5,
+        tune=5,
+        seed=1,
+        progress_bar=False,
+    )
+
+    assert len(seen) == 2
+    for point in seen:
+        np.testing.assert_allclose(point, expected)
+
+
+@pytest.mark.pymc
+@parameterize_backends
+def test_pymc_with_init_point_fn_replacement(backend, gradient_backend):
+    with pm.Model() as model:
+        pm.Normal("a")
+        pm.Normal("b")
+
+    def old_init_point_fn(seed):
+        raise AssertionError("old init callback should have been replaced")
+
+    def new_init_point_fn(seed):
+        called.append(True)
+        return np.array([0.25, -0.75])
+
+    called = []
+    compiled = (
+        nutpie.compile_pymc_model(
+            model, backend=backend, gradient_backend=gradient_backend
+        )
+        .with_init_point_fn(old_init_point_fn)
+        .with_init_point_fn(new_init_point_fn)
+    )
+
+    nutpie.sample(
+        compiled,
+        chains=1,
+        draws=5,
+        tune=5,
+        seed=1,
+        progress_bar=False,
+    )
+
+    assert called == [True]

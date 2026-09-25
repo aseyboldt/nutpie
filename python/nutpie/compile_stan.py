@@ -4,14 +4,17 @@ import json
 import logging
 import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from numpy.typing import NDArray
 
 from nutpie import _lib
+from nutpie.compiled_pyfunc import SeedType
 from nutpie.sample import CompiledModel
 
 logger = logging.getLogger("nutpie")
@@ -26,6 +29,7 @@ class CompiledStanModel(CompiledModel):
     model: Any
     model_name: str | None = None
     _transform_adapt_args: dict | None = None
+    _init_point_fn: Callable[[SeedType], np.ndarray] | None = None
 
     def with_data(self, *, seed=None, **updates):
         if self.data is None:
@@ -70,7 +74,14 @@ class CompiledStanModel(CompiledModel):
         dim_sizes = {name: len(dim) for name, dim in coords.items()}
 
         model = _lib.StanModel(
-            self.library, dim_sizes, dims, coords, seed, data_json, make_adapter
+            self.library,
+            dim_sizes,
+            dims,
+            coords,
+            seed,
+            data_json,
+            make_adapter,
+            self._init_point_fn,
         )
         coords = self._coords
         if coords is None:
@@ -85,6 +96,7 @@ class CompiledStanModel(CompiledModel):
             library=self.library,
             dims=self.dims,
             model=model,
+            _init_point_fn=self._init_point_fn,
         )
 
     def with_coords(self, **coords):
@@ -105,6 +117,15 @@ class CompiledStanModel(CompiledModel):
 
     def with_transform_adapt(self, **kwargs):
         return replace(self, _transform_adapt_args=kwargs).with_data()
+
+    def with_init_point_fn(self, fn: Callable[[SeedType], np.ndarray]):
+        """Return a copy that uses ``fn(seed)`` to initialize each chain.
+
+        ``seed`` is an integer. The function must return a flat array of
+        unconstrained parameter values. This overrides any previously
+        configured init callback.
+        """
+        return replace(self, _init_point_fn=fn).with_data()
 
     def _make_model(self, init_mean):
         if self.model is None:

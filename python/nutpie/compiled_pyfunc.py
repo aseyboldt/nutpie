@@ -49,6 +49,15 @@ class PyFuncModel(CompiledModel):
     def with_transform_adapt(self, **kwargs):
         return dataclasses.replace(self, _transform_adapt_args=kwargs)
 
+    def with_init_point_fn(self, fn: Callable[[SeedType], np.ndarray]):
+        """Return a copy that uses ``fn(seed)`` to initialize each chain.
+
+        ``seed`` is an integer. The function must return a flat array of
+        unconstrained parameter values. This overrides any previously
+        configured init callback.
+        """
+        return dataclasses.replace(self, _make_initial_points=fn)
+
     def _make_sampler(
         self,
         settings,
