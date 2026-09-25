@@ -1,14 +1,15 @@
 use std::sync::Arc;
 use std::{ffi::CString, path::PathBuf};
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use arrow::array::{Array, FixedSizeListArray, Float64Array, StructArray};
 use arrow::datatypes::{DataType, Field};
 use bridgestan::open_library;
 use itertools::{izip, Itertools};
+use numpy::PyReadonlyArray1;
 use nuts_rs::{CpuLogpFunc, CpuMath, DrawStorage, LogpError, Model, Settings};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyAnyMethods, PyDict, PyTuple};
 use pyo3::{exceptions::PyValueError, pyclass, pymethods, PyResult};
 use rand::prelude::Distribution;
 use rand::{thread_rng, RngCore};
@@ -67,6 +68,7 @@ impl StanVariable {
 #[derive(Clone)]
 pub struct StanModel {
     model: Arc<InnerModel>,
+    init_point_func: Option<Arc<Py<PyAny>>>,
     variables: Vec<Parameter>,
 }
 
@@ -136,7 +138,12 @@ fn params(
 #[pymethods]
 impl StanModel {
     #[new]
-    pub fn new(lib: StanLibrary, seed: Option<u32>, data: Option<String>) -> anyhow::Result<Self> {
+    pub fn new(
+        lib: StanLibrary,
+        seed: Option<u32>,
+        data: Option<String>,
+        init_point_func: Option<Py<PyAny>>,
+    ) -> anyhow::Result<Self> {
         let seed = match seed {
             Some(seed) => seed,
             None => thread_rng().next_u32(),
@@ -146,7 +153,11 @@ impl StanModel {
             bridgestan::Model::new(lib.0, data.as_ref(), seed).map_err(anyhow::Error::new)?,
         );
         let variables = params(&model, true, true)?;
-        Ok(StanModel { model, variables })
+        Ok(StanModel {
+            model,
+            init_point_func: init_point_func.map(Arc::new),
+            variables,
+        })
     }
 
     pub fn variables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -172,6 +183,34 @@ impl StanModel {
             .split(',')
             .map(|name| name.to_string())
             .collect())
+    }
+
+    pub fn unconstrain(&self, theta: PyReadonlyArray1<'_, f64>) -> anyhow::Result<Vec<f64>> {
+        let theta = theta.as_slice()?;
+        let mut out = vec![0f64; self.model.param_unc_num()];
+        self.model
+            .param_unconstrain(theta, &mut out)
+            .context("Failed to unconstrain parameters")?;
+        Ok(out)
+    }
+
+    pub fn unconstrain_json(&self, json: &str) -> anyhow::Result<Vec<f64>> {
+        let json = CString::new(json)?;
+        let mut out = vec![0f64; self.model.param_unc_num()];
+        self.model
+            .param_unconstrain_json(json.as_c_str(), &mut out)
+            .context("Failed to unconstrain parameters from json")?;
+        Ok(out)
+    }
+
+    pub fn param_constrain(&self, theta: PyReadonlyArray1<'_, f64>) -> anyhow::Result<Vec<f64>> {
+        let theta = theta.as_slice()?;
+        let mut out = vec![0f64; self.model.param_num(false, false)];
+        let mut rng = self.model.new_rng(0)?;
+        self.model
+            .param_constrain(theta, false, false, &mut out, Some(&mut rng))
+            .context("Failed to constrain parameters")?;
+        Ok(out)
     }
 
     /*
@@ -395,6 +434,34 @@ impl Model for StanModel {
         rng: &mut R,
         position: &mut [f64],
     ) -> anyhow::Result<()> {
+        if let Some(init_point_func) = &self.init_point_func {
+            let seed = rng.next_u64();
+            Python::with_gil(|py| -> anyhow::Result<()> {
+                let random = py.import_bound("numpy.random")?;
+                let rng = random.call_method1("default_rng", (seed,))?;
+                // TODO: pass chain id here too once nuts-rs threads it through Model::init_position
+                let point: PyReadonlyArray1<f64> =
+                    init_point_func
+                        .call1(py, (rng,))?
+                        .extract(py)
+                        .context("init_point_func must return a one-dimensional float64 array")?;
+                let point = point
+                    .as_slice()
+                    .context("init_point_func must return a contiguous float64 array")?;
+                if point.len() != position.len() {
+                    bail!(
+                        "init_point_func returned {} values, expected {}",
+                        point.len(),
+                        position.len()
+                    );
+                }
+                position.copy_from_slice(point);
+                Ok(())
+            })
+            .context("Failed to call init_point_func")?;
+            return Ok(());
+        }
+
         let dist = StandardNormal;
         dist.sample_iter(rng)
             .zip(position.iter_mut())
