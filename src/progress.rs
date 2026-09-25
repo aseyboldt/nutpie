@@ -1,29 +1,58 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        mpsc::{sync_channel, SyncSender},
+        Arc,
+    },
+    thread::spawn,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 use nuts_rs::{ChainProgress, ProgressCallback};
-use pyo3::{Py, PyAny, Python};
+use pyo3::{types::PyList, Py, PyAny, Python};
 use time_humanize::{Accuracy, Tense};
 use upon::{Engine, Value};
+
+use crate::wrapper::PyChainProgress;
 
 pub struct ProgressHandler {
     engine: Engine<'static>,
     template: String,
-    callback: Py<PyAny>,
     rate: Duration,
     n_cores: usize,
+    updates: SyncSender<String>,
 }
 
 impl ProgressHandler {
-    pub fn new(callback: Py<PyAny>, rate: Duration, template: String, n_cores: usize) -> Self {
+    pub fn new(callback: Arc<Py<PyAny>>, rate: Duration, template: String, n_cores: usize) -> Self {
         let engine = Engine::new();
+
+        let (update_tx, update_rx) = sync_channel(1);
+
+        spawn(move || {
+            // We keep an extra gil reference alive, to ensure the
+            // python ThreadState is not destroyed.
+            // See https://github.com/PyO3/pyo3/issues/5467
+            Python::attach(move |py| {
+                py.detach(move || loop {
+                    let update = update_rx.recv();
+                    let Ok(update) = update else { break };
+                    let res = Python::attach(|py| callback.call1(py, (update,)));
+                    if let Err(err) = res {
+                        eprintln!("Error in progress callback: {err}");
+                    }
+                });
+            });
+        });
+
         Self {
             engine,
-            callback,
             rate,
             template,
             n_cores,
+            updates: update_tx,
         }
     }
 
@@ -49,8 +78,11 @@ impl ProgressHandler {
             let progress =
                 progress_to_value(progress_update_count, self.n_cores, time_sampling, progress);
             let rendered = template.render_from(&self.engine, &progress).to_string();
-            let rendered = rendered.unwrap_or_else(|err| format!("{}", err));
-            let _ = Python::with_gil(|py| self.callback.call1(py, (rendered,)));
+            let rendered = rendered.unwrap_or_else(|err| format!("{err}"));
+            if let Err(e) = self.updates.send(rendered) {
+                eprintln!("Could not send progress update: {e}");
+                return;
+            }
             progress_update_count += 1;
         };
 
@@ -225,6 +257,84 @@ fn estimate_remaining_time(
     Some(core_times.into_iter().max().unwrap_or(Duration::ZERO))
 }
 
+#[derive(PartialEq, Eq)]
+enum ChainState {
+    Normal,
+    Divergences,
+    Finished,
+}
+
+struct TerminalBar {
+    pb: ProgressBar,
+    last_position: u64,
+    mode: ChainState,
+    segment_style: String,
+}
+
+impl TerminalBar {
+    pub fn new(mb: &MultiProgress, draws: u64) -> Self {
+        let segment_style = "━━╸  ".to_string();
+        let pb = mb
+            .add(ProgressBar::new(draws))
+            .with_finish(ProgressFinish::Abandon);
+        pb.set_style(
+            ProgressStyle::with_template("  {bar:35.blue}   {pos:10} {msg} {elapsed:10} {eta:10}")
+                .unwrap()
+                .progress_chars(&segment_style),
+        );
+
+        Self {
+            pb,
+            last_position: 0,
+            mode: ChainState::Normal,
+            segment_style,
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: ChainState) {
+        if self.mode != mode {
+            let color = match mode {
+                ChainState::Normal => "blue",
+                ChainState::Divergences => "red",
+                ChainState::Finished => "green",
+            };
+            self.pb.set_style(
+                ProgressStyle::with_template(&format!(
+                    "  {{bar:35.{color}}}   {{pos:10}} {{msg}} {{elapsed:10}} {{eta:10}}"
+                ))
+                .unwrap()
+                .progress_chars(&self.segment_style),
+            );
+
+            self.mode = mode
+        }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.pb.is_finished()
+    }
+
+    pub fn finish(&mut self) {
+        if self.mode != ChainState::Divergences {
+            self.set_mode(ChainState::Finished);
+        }
+        self.pb.finish();
+    }
+
+    pub fn update_position(&mut self, chain: &ChainProgress) {
+        let position = chain.finished_draws as u64;
+        let delta = position.saturating_sub(self.last_position);
+        if delta > 0 && !self.is_finished() {
+            self.pb.set_position(position);
+            self.pb.set_message(format!(
+                "{:<12} {:<11.2} {:<12}",
+                chain.divergences, chain.step_size, chain.latest_num_steps
+            ));
+            self.last_position = position;
+        }
+    }
+}
+
 pub struct IndicatifHandler {
     rate: Duration,
 }
@@ -236,39 +346,91 @@ impl IndicatifHandler {
 
     pub fn into_callback(self) -> Result<ProgressCallback> {
         let mut finished = false;
-        let mut last_draws = 0;
-        let mut bar = None;
+        let multibar = MultiProgress::new();
+        let mut bars = vec![];
+
+        let header = multibar.add(ProgressBar::new(0));
+
+        header.set_style(
+            ProgressStyle::default_bar()
+                .template("{msg:.bold}")
+                .unwrap(),
+        );
+        header.set_message(format!(
+            "  {:<35}   {:<10} {:<12} {:<11} {:<12} {:<10} {:<10}",
+            "Progress", "Draws", "Divergences", "Step size", "Grad evals", "Elapsed", "Remaining"
+        ));
+
+        header.tick();
+
+        let separator = multibar
+            .add(ProgressBar::new(0))
+            .with_finish(ProgressFinish::Abandon);
+        separator.set_style(ProgressStyle::default_bar().template("{msg}").unwrap());
+        separator.set_message(format!(" {}", "─".repeat(109)));
+        separator.tick();
 
         let callback = move |_time_sampling, progress: Box<[ChainProgress]>| {
-            let total: u64 = progress.iter().map(|chain| chain.total_draws as u64).sum();
-
-            if bar.is_none() {
-                bar = Some(ProgressBar::new(total));
+            if bars.is_empty() {
+                for chain in progress.iter() {
+                    bars.push(TerminalBar::new(&multibar, chain.total_draws as u64));
+                }
             }
-
-            let Some(ref bar) = bar else { unreachable!() };
 
             if finished {
                 return;
             }
+            for (bar, chain) in bars.iter_mut().zip(progress.iter()) {
+                if !bar.is_finished() && chain.finished_draws == chain.total_draws {
+                    bar.pb.set_position(chain.total_draws as u64);
+                    bar.finish();
+                }
+            }
+
             if progress
                 .iter()
                 .all(|chain| chain.finished_draws == chain.total_draws)
             {
                 finished = true;
-                bar.set_position(total);
-                bar.finish();
+                header.finish();
+                separator.finish();
             }
 
-            let finished_draws: u64 = progress
-                .iter()
-                .map(|chain| chain.finished_draws as u64)
-                .sum();
+            for (bar, chain) in bars.iter_mut().zip(progress.iter()) {
+                if chain.divergences > 0 {
+                    bar.set_mode(ChainState::Divergences);
+                }
+                bar.update_position(chain);
+            }
+        };
 
-            let delta = finished_draws.saturating_sub(last_draws);
-            if delta > 0 {
-                bar.set_position(finished_draws);
-                last_draws = finished_draws;
+        Ok(ProgressCallback {
+            callback: Box::new(callback),
+            rate: self.rate,
+        })
+    }
+}
+
+pub struct RawCallbackHandler {
+    callback: Arc<Py<PyAny>>,
+    rate: Duration,
+}
+
+impl RawCallbackHandler {
+    pub fn new(callback: Arc<Py<PyAny>>, rate: Duration) -> Self {
+        Self { callback, rate }
+    }
+
+    pub fn into_callback(self) -> Result<ProgressCallback> {
+        let callback = move |_time_sampling: Duration, progress: Box<[ChainProgress]>| {
+            let res = Python::attach(|py| {
+                let items: Vec<PyChainProgress> =
+                    progress.iter().cloned().map(PyChainProgress::new).collect();
+                let list = PyList::new(py, items).expect("failed to build PyList");
+                self.callback.call1(py, (list,))
+            });
+            if let Err(err) = res {
+                eprintln!("Error in progress callback: {err}");
             }
         };
 

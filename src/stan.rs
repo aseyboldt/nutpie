@@ -1,30 +1,33 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::{ffi::CString, path::PathBuf};
 
-use anyhow::{bail, Context};
-use arrow::array::{Array, FixedSizeListArray, Float64Array, StructArray};
-use arrow::datatypes::{DataType, Field};
+use anyhow::{anyhow, bail, Context, Result};
 use bridgestan::open_library;
-use itertools::{izip, Itertools};
+use itertools::Itertools;
 use numpy::PyReadonlyArray1;
-use nuts_rs::{CpuLogpFunc, CpuMath, DrawStorage, LogpError, Model, Settings};
-use pyo3::prelude::*;
-use pyo3::types::{PyAnyMethods, PyDict, PyTuple};
+use nuts_rs::{CpuLogpFunc, CpuMath, HasDims, LogpError, Model, Storable, Value};
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::types::{PyAnyMethods, PyDict, PyNone, PyTuple};
 use pyo3::{exceptions::PyValueError, pyclass, pymethods, PyResult};
+use pyo3::{prelude::*, BoundObject};
 use rand::prelude::Distribution;
-use rand::{thread_rng, RngCore};
+use rand::{rng, Rng};
 use rand_distr::StandardNormal;
 use smallvec::{SmallVec, ToSmallVec};
 
 use thiserror::Error;
 
+use crate::common::{ItemType, PyValue, PyVariable};
+use crate::wrapper::PyTransformAdapt;
+
 type InnerModel = bridgestan::Model<Arc<bridgestan::StanLibrary>>;
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct StanLibrary(Arc<bridgestan::StanLibrary>);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Parameter {
     name: String,
     shape: Vec<usize>,
@@ -38,7 +41,7 @@ impl StanLibrary {
     #[new]
     fn new(path: PathBuf) -> PyResult<Self> {
         let lib = open_library(path)
-            .map_err(|e| PyValueError::new_err(format!("Could not open stan libray: {}", e)))?;
+            .map_err(|e| PyValueError::new_err(format!("Could not open stan libray: {e}")))?;
         Ok(Self(Arc::new(lib)))
     }
 }
@@ -54,141 +57,306 @@ impl StanVariable {
     }
 
     #[getter]
-    fn shape<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
-        PyTuple::new_bound(py, self.0.shape.iter())
+    fn shape<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.0.shape.iter())
     }
 
     #[getter]
     fn size(&self) -> usize {
         self.0.size
     }
+
+    #[getter]
+    fn start_idx(&self) -> usize {
+        self.0.start_idx
+    }
+
+    #[getter]
+    fn end_idx(&self) -> usize {
+        self.0.end_idx
+    }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct StanModel {
-    model: Arc<InnerModel>,
+    inner: Arc<InnerModel>,
+    variables: Vec<PyVariable>,
+    transform_adapter: Option<PyTransformAdapt>,
+    dim_sizes: HashMap<String, u64>,
+    coords: HashMap<String, Value>,
+    #[pyo3(get)]
+    dims: HashMap<String, Vec<String>>,
+    unc_names: Value,
     init_point_func: Option<Arc<Py<PyAny>>>,
-    variables: Vec<Parameter>,
 }
 
 /// Return meta information about the constrained parameters of the model
 fn params(
-    model: &InnerModel,
-    include_tp: bool,
-    include_gq: bool,
-) -> anyhow::Result<Vec<Parameter>> {
-    let var_string = model.param_names(include_tp, include_gq);
-    let name_idxs: anyhow::Result<Vec<(&str, Vec<usize>)>> = var_string
+    var_string: &str,
+    all_dims: &mut HashMap<String, Vec<String>>,
+    dim_sizes: &mut HashMap<String, u64>,
+) -> anyhow::Result<Vec<PyVariable>> {
+    if var_string.is_empty() {
+        return Ok(vec![]);
+    }
+    // Parse each variable string into (name, is_complex, indices)
+    let parsed_variables: anyhow::Result<Vec<(String, bool, Vec<usize>)>> = var_string
         .split(',')
         .map(|var| {
-            let mut parts = var.split('.');
-            let name = parts
-                .next()
-                .ok_or_else(|| anyhow::Error::msg("Invalid parameter name"))?;
-            let idxs: anyhow::Result<Vec<usize>> = parts
-                .map(|mut idx| {
-                    if idx == "real" {
-                        idx = "1";
-                    }
-                    if idx == "imag" {
-                        idx = "2";
-                    }
-                    let idx: usize = idx
-                        .parse()
-                        .map_err(|_| anyhow::Error::msg("Invalid parameter name"))?;
-                    Ok(idx - 1)
-                })
-                .collect();
-            Ok((name, idxs?))
+            let mut indices = vec![];
+            let mut remaining = var;
+            let mut complex_suffix = None;
+
+            // Parse from right to left, extracting indices and checking for complex type
+            while let Some(idx) = remaining.rfind('.') {
+                let suffix = &remaining[(idx + 1)..];
+
+                // Handle complex number suffixes
+                if suffix == "real" || suffix == "imag" {
+                    complex_suffix = Some(suffix);
+                    remaining = &remaining[..idx];
+                    continue;
+                }
+
+                // Try to parse as index
+                if let Ok(index) = suffix.parse::<usize>() {
+                    // Convert from 1-based to 0-based indexing
+                    let zero_based_idx = index.checked_sub(1).ok_or_else(|| {
+                        anyhow::Error::msg("Invalid parameter index (must be > 0)")
+                    })?;
+
+                    indices.push(zero_based_idx);
+                    remaining = &remaining[..idx];
+                } else {
+                    // Not a number - this is part of the variable name
+                    break;
+                }
+            }
+
+            // Variable name is what remains
+            let name = remaining.trim().to_string();
+
+            // Reverse indices since we parsed right-to-left
+            indices.reverse();
+
+            Ok((name, complex_suffix.is_some(), indices))
         })
         .collect();
 
+    // Group variables by name and build Parameter objects
     let mut variables = Vec::new();
     let mut start_idx = 0;
-    for (name, idxs) in &name_idxs?.iter().chunk_by(|(name, _)| name) {
-        let mut shape: Vec<usize> = idxs
-            .map(|(_name, idx)| idx)
-            .fold(None, |acc, elem| {
-                let mut shape = acc.unwrap_or(elem.clone());
-                shape
-                    .iter_mut()
-                    .zip_eq(elem.iter())
-                    .for_each(|(old, &new)| {
-                        *old = new.max(*old);
-                    });
-                Some(shape)
-            })
-            .unwrap_or(vec![]);
-        shape.iter_mut().for_each(|max_idx| *max_idx += 1);
-        let size = shape.iter().product();
-        let end_idx = start_idx + size;
-        variables.push(Parameter {
-            name: name.to_string(),
-            shape,
-            size,
-            start_idx,
-            end_idx,
-        });
+
+    for (name, group) in &parsed_variables?.iter().chunk_by(|(name, _, _)| name) {
+        // Find maximum shape and check if this is a complex variable
+        let (shape, is_complex) = determine_variable_shape(group)
+            .context(format!("Error while parsing stan variable {name}"))?;
+
+        // Calculate total size of this variable
+        let size: usize = shape.iter().product();
+        let mut end_idx = start_idx + size;
+
+        // Create Parameter objects (one for real and one for imag if complex)
+        if is_complex {
+            variables.push(PyVariable::new(
+                format!("{name}.real"),
+                ItemType(nuts_rs::ItemType::F64),
+                Some(shape.iter().map(|&d| d as u64).collect()),
+                all_dims,
+                dim_sizes,
+                Some(start_idx),
+            )?);
+            start_idx = end_idx;
+            end_idx = start_idx + size;
+            variables.push(PyVariable::new(
+                format!("{name}.imag"),
+                ItemType(nuts_rs::ItemType::F64),
+                Some(shape.iter().map(|&d| d as u64).collect()),
+                all_dims,
+                dim_sizes,
+                Some(start_idx),
+            )?);
+        } else {
+            variables.push(PyVariable::new(
+                name.to_string(),
+                ItemType(nuts_rs::ItemType::F64),
+                Some(shape.iter().map(|&d| d as u64).collect()),
+                all_dims,
+                dim_sizes,
+                Some(start_idx),
+            )?);
+        }
+
+        // Move to the next variable
         start_idx = end_idx;
     }
+
     Ok(variables)
 }
 
+// Helper function to determine the shape and complex flag for a group of variables
+fn determine_variable_shape<'a, I>(group: I) -> anyhow::Result<(Vec<usize>, bool)>
+where
+    I: Iterator<Item = &'a (String, bool, Vec<usize>)>,
+{
+    let group = group.collect_vec();
+
+    let (mut shape, is_complex) = group
+        .iter()
+        .map(|&(_, is_complex, idx)| (idx, is_complex))
+        .fold(None, |acc, (elem_index, &elem_is_complex)| {
+            let (mut shape, is_complex) = acc.unwrap_or((elem_index.clone(), elem_is_complex));
+            assert!(
+                is_complex == elem_is_complex,
+                "Inconsistent complex flags for same variable"
+            );
+
+            // Find maximum index in each dimension
+            shape
+                .iter_mut()
+                .zip_eq(elem_index.iter())
+                .for_each(|(old, &new)| {
+                    *old = new.max(*old);
+                });
+
+            Some((shape, is_complex))
+        })
+        .expect("List of variable entries cannot be empty");
+
+    shape.iter_mut().for_each(|max_idx| *max_idx += 1);
+
+    // Check if the indices are in Fortran order
+    let mut expected_index: Vec<usize> = vec![0; shape.len()];
+    let mut expect_imag = false;
+    for (_, _, idx) in group.iter() {
+        if idx != &expected_index {
+            bail!("Stan returned data that was not in the expected order.")
+        }
+        if is_complex {
+            expect_imag = !expect_imag;
+        }
+        if !expect_imag {
+            // increment expected index
+            for i in 0..shape.len() {
+                if expected_index[i] < shape[i] - 1 {
+                    expected_index[i] += 1;
+                    break;
+                } else {
+                    expected_index[i] = 0;
+                }
+            }
+        }
+    }
+
+    Ok((shape, is_complex))
+}
 #[pymethods]
 impl StanModel {
     #[new]
+    #[pyo3(signature = (lib, dim_sizes, dims, coords, seed=None, data=None, transform_adapter=None, init_point_func=None))]
     pub fn new(
+        py: Python<'_>,
         lib: StanLibrary,
+        dim_sizes: Py<PyDict>,
+        dims: Py<PyDict>,
+        coords: Py<PyDict>,
         seed: Option<u32>,
         data: Option<String>,
+        transform_adapter: Option<Py<PyAny>>,
         init_point_func: Option<Py<PyAny>>,
     ) -> anyhow::Result<Self> {
+        let mut dim_sizes = dim_sizes
+            .bind(py)
+            .iter()
+            .map(|(key, value)| {
+                let key: String = key.extract().context("Dimension key is not a string")?;
+                let value: u64 = value
+                    .extract()
+                    .context("Dimension size value is not an integer")?;
+                Ok((key, value))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        let mut dims = dims
+            .bind(py)
+            .iter()
+            .map(|(key, value)| {
+                let key: String = key.extract().context("Dimension key is not a string")?;
+                let value: Vec<String> = value
+                    .extract()
+                    .context("Dimension value is not a list of strings")?;
+                Ok((key, value))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        let coords = coords
+            .bind(py)
+            .iter()
+            .map(|(key, value)| {
+                let key: String = key.extract().context("Coordinate key is not a string")?;
+                let value: PyValue = value
+                    .extract()
+                    .with_context(|| format!("Coordinate {} value has unsupported type", key))?;
+                Ok((key, value.into_value()))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
         let seed = match seed {
             Some(seed) => seed,
-            None => thread_rng().next_u32(),
+            None => rng().next_u32(),
         };
         let data: Option<CString> = data.map(CString::new).transpose()?;
-        let model = Arc::new(
-            bridgestan::Model::new(lib.0, data.as_ref(), seed).map_err(anyhow::Error::new)?,
-        );
-        let variables = params(&model, true, true)?;
+        let mut model =
+            bridgestan::Model::new(lib.0, data.as_ref(), seed).map_err(anyhow::Error::new)?;
+
+        // TODO: bridgestan should not require mut self here
+        let names = model.param_unc_names();
+        let mut names: Vec<_> = names.split(',').map(|v| v.to_string()).collect();
+        if let Some(first) = names.first() {
+            if first.is_empty() {
+                names = vec![];
+            }
+        };
+        let unc_names = Value::Strings(names);
+
+        let model = Arc::new(model);
+
+        let var_string = model.param_names(true, true);
+        let variables = params(var_string, &mut dims, &mut dim_sizes)?;
+        let transform_adapter = transform_adapter.map(PyTransformAdapt::new);
+
         Ok(StanModel {
-            model,
-            init_point_func: init_point_func.map(Arc::new),
+            inner: model,
             variables,
+            transform_adapter,
+            dim_sizes,
+            coords,
+            dims,
+            unc_names,
+            init_point_func: init_point_func.map(Arc::new),
         })
     }
 
     pub fn variables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let out = PyDict::new_bound(py);
+        let out = PyDict::new(py);
         let results: Result<Vec<_>, _> = self
             .variables
             .iter()
-            .map(|var| out.set_item(var.name.clone(), StanVariable(var.clone()).into_py(py)))
+            .map(|var| out.set_item(var.name.clone(), var.clone()))
             .collect();
         results?;
         Ok(out)
     }
 
     pub fn ndim(&self) -> usize {
-        self.model.param_unc_num()
-    }
-
-    pub fn param_unc_names(&mut self) -> anyhow::Result<Vec<String>> {
-        Ok(Arc::get_mut(&mut self.model)
-            .ok_or_else(|| anyhow::format_err!("Model is currently in use"))
-            .context("Failed to access the names of unconstrained parameters")?
-            .param_unc_names()
-            .split(',')
-            .map(|name| name.to_string())
-            .collect())
+        self.inner.param_unc_num()
     }
 
     pub fn unconstrain(&self, theta: PyReadonlyArray1<'_, f64>) -> anyhow::Result<Vec<f64>> {
         let theta = theta.as_slice()?;
-        let mut out = vec![0f64; self.model.param_unc_num()];
-        self.model
+        let mut out = vec![0f64; self.inner.param_unc_num()];
+        self.inner
             .param_unconstrain(theta, &mut out)
             .context("Failed to unconstrain parameters")?;
         Ok(out)
@@ -196,8 +364,8 @@ impl StanModel {
 
     pub fn unconstrain_json(&self, json: &str) -> anyhow::Result<Vec<f64>> {
         let json = CString::new(json)?;
-        let mut out = vec![0f64; self.model.param_unc_num()];
-        self.model
+        let mut out = vec![0f64; self.inner.param_unc_num()];
+        self.inner
             .param_unconstrain_json(json.as_c_str(), &mut out)
             .context("Failed to unconstrain parameters from json")?;
         Ok(out)
@@ -205,10 +373,10 @@ impl StanModel {
 
     pub fn param_constrain(&self, theta: PyReadonlyArray1<'_, f64>) -> anyhow::Result<Vec<f64>> {
         let theta = theta.as_slice()?;
-        let mut out = vec![0f64; self.model.param_num(false, false)];
-        let mut rng = self.model.new_rng(0)?;
-        self.model
-            .param_constrain(theta, false, false, &mut out, Some(&mut rng))
+        let mut out = vec![0f64; self.inner.param_num(false, false)];
+        let mut model_rng = self.inner.new_rng(rng().next_u32())?;
+        self.inner
+            .param_constrain(theta, false, false, &mut out, Some(&mut model_rng))
             .context("Failed to constrain parameters")?;
         Ok(out)
     }
@@ -234,7 +402,12 @@ impl StanModel {
     */
 }
 
-pub struct StanDensity<'model>(&'model InnerModel);
+pub struct StanDensity<'model> {
+    model: &'model StanModel,
+    rng: bridgestan::Rng<&'model bridgestan::StanLibrary>,
+    transform_adapter: Option<PyTransformAdapt>,
+    expanded_buffer: Vec<f64>,
+}
 
 #[derive(Debug, Error)]
 pub enum StanLogpError {
@@ -242,6 +415,10 @@ pub enum StanLogpError {
     BridgeStan(#[from] bridgestan::BridgeStanError),
     #[error("Bad logp value: {0}")]
     BadLogp(f64),
+    #[error("Python exception: {0}")]
+    PyErr(#[from] PyErr),
+    #[error("Unspecified Error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }
 
 impl LogpError for StanLogpError {
@@ -250,11 +427,67 @@ impl LogpError for StanLogpError {
     }
 }
 
+pub struct ExpandedVector(Vec<Option<nuts_rs::Value>>);
+
+impl<'model> Storable<StanDensity<'model>> for ExpandedVector {
+    fn names<'a>(parent: &'a StanDensity<'model>) -> Vec<&'a str> {
+        parent
+            .model
+            .variables
+            .iter()
+            .map(|var| var.name.as_str())
+            .collect()
+    }
+
+    fn item_type(parent: &StanDensity<'model>, item: &str) -> nuts_rs::ItemType {
+        parent
+            .model
+            .variables
+            .iter()
+            .find(|var| var.name == item)
+            .map(|var| var.item_type.as_inner().clone())
+            .expect("Item not found")
+    }
+
+    fn dims<'a>(parent: &'a StanDensity<'model>, item: &str) -> Vec<&'a str> {
+        parent
+            .model
+            .variables
+            .iter()
+            .find(|var| var.name == item)
+            .map(|var| var.dims.as_slice().iter().map(|s| s.as_str()).collect())
+            .expect("Item not found")
+    }
+
+    fn get_all<'a>(&'a mut self, parent: &'a StanDensity<'model>) -> Vec<(&'a str, Option<Value>)> {
+        self.0
+            .iter_mut()
+            .zip(parent.model.variables.iter())
+            .map(|(val, var)| (var.name.as_str(), val.take()))
+            .collect()
+    }
+}
+
+impl<'model> HasDims for StanDensity<'model> {
+    fn dim_sizes(&self) -> HashMap<String, u64> {
+        self.model.dim_sizes.clone()
+    }
+
+    fn coords(&self) -> HashMap<String, Value> {
+        self.model.coords.clone()
+    }
+}
+
 impl<'model> CpuLogpFunc for StanDensity<'model> {
     type LogpError = StanLogpError;
+    type FlowParameters = Py<PyAny>;
+    type ExpandedVector = ExpandedVector;
 
     fn logp(&mut self, position: &[f64], grad: &mut [f64]) -> Result<f64, Self::LogpError> {
-        let logp = self.0.log_density_gradient(position, true, true, grad)?;
+        let logp = self
+            .model
+            .inner
+            .log_density_gradient(position, true, true, grad)?;
         if !logp.is_finite() {
             return Err(StanLogpError::BadLogp(logp));
         }
@@ -262,15 +495,216 @@ impl<'model> CpuLogpFunc for StanDensity<'model> {
     }
 
     fn dim(&self) -> usize {
-        self.0.param_unc_num()
+        self.model.inner.param_unc_num()
+    }
+
+    fn vector_coord(&self) -> Option<Value> {
+        Some(self.model.unc_names.clone())
+    }
+
+    fn expand_vector<R>(
+        &mut self,
+        _rng: &mut R,
+        array: &[f64],
+    ) -> Result<Self::ExpandedVector, nuts_rs::CpuMathError>
+    where
+        R: rand::Rng + ?Sized,
+    {
+        self.model
+            .inner
+            .param_constrain(
+                array,
+                true,
+                true,
+                &mut self.expanded_buffer,
+                Some(&mut self.rng),
+            )
+            .context("Failed to constrain the parameters of the draw")
+            .map_err(|e| nuts_rs::CpuMathError::ExpandError(format!("{}", e)))?;
+
+        let mut vars = Vec::new();
+
+        for var in self.model.variables.iter() {
+            let mut out = Vec::with_capacity(var.num_elements);
+            let start = var.start_idx.expect("Variable start index not set");
+            let end = var.end_idx.expect("Variable end index not set");
+            let slice = &self.expanded_buffer[start..end];
+            assert!(slice.len() == var.num_elements);
+
+            if var.num_elements == 0 {
+                vars.push(Some(Value::F64(out)));
+                continue;
+            }
+
+            // The slice is in fortran order. This doesn't matter if it low dim
+            if var.shape.as_slice().len() < 2 {
+                out.extend_from_slice(slice);
+                vars.push(Some(Value::F64(out)));
+                continue;
+            }
+
+            // We need to transpose
+            fortran_to_c_order(slice, var.shape.as_slice(), &mut out);
+            vars.push(Some(Value::F64(out)));
+        }
+
+        Ok(ExpandedVector(vars))
+    }
+
+    fn inv_transform_normalize(
+        &mut self,
+        params: &Py<PyAny>,
+        untransformed_position: &[f64],
+        untransformed_gradient: &[f64],
+        transformed_position: &mut [f64],
+        transformed_gradient: &mut [f64],
+    ) -> std::result::Result<f64, Self::LogpError> {
+        let logdet = self
+            .transform_adapter
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transformation adapter specified"))?
+            .inv_transform_normalize(
+                params,
+                untransformed_position,
+                untransformed_gradient,
+                transformed_position,
+                transformed_gradient,
+            )
+            .context("failed inv_transform_normalize")?;
+        Ok(logdet)
+    }
+
+    fn init_from_transformed_position(
+        &mut self,
+        params: &Py<PyAny>,
+        untransformed_position: &mut [f64],
+        untransformed_gradient: &mut [f64],
+        transformed_position: &[f64],
+        transformed_gradient: &mut [f64],
+    ) -> std::result::Result<(f64, f64), Self::LogpError> {
+        let adapter = self
+            .transform_adapter
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transformation adapter specified"))?;
+
+        let part1 = adapter
+            .init_from_transformed_position_part1(
+                params,
+                untransformed_position,
+                transformed_position,
+            )
+            .context("Failed init_from_transformed_position_part1")?;
+
+        let logp = self.logp(untransformed_position, untransformed_gradient)?;
+
+        let adapter = self
+            .transform_adapter
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transformation adapter specified"))?;
+
+        let logdet = adapter
+            .init_from_transformed_position_part2(
+                params,
+                part1,
+                untransformed_gradient,
+                transformed_gradient,
+            )
+            .context("Failed init_from_transformed_position_part2")?;
+        Ok((logp, logdet))
+    }
+
+    fn init_from_untransformed_position(
+        &mut self,
+        params: &Py<PyAny>,
+        untransformed_position: &[f64],
+        untransformed_gradient: &mut [f64],
+        transformed_position: &mut [f64],
+        transformed_gradient: &mut [f64],
+    ) -> std::result::Result<(f64, f64), Self::LogpError> {
+        let logp = self
+            .logp(untransformed_position, untransformed_gradient)
+            .context("Failed to call stan logp function")?;
+
+        let logdet = self
+            .transform_adapter
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transformation adapter specified"))?
+            .inv_transform_normalize(
+                params,
+                untransformed_position,
+                untransformed_gradient,
+                transformed_position,
+                transformed_gradient,
+            )
+            .context("Failed inv_transform_normalize in stan init_from_untransformed_position")?;
+        Ok((logp, logdet))
+    }
+
+    fn update_transformation<'a, R: rand::Rng + ?Sized>(
+        &'a mut self,
+        rng: &mut R,
+        untransformed_positions: impl ExactSizeIterator<Item = &'a [f64]>,
+        untransformed_gradients: impl ExactSizeIterator<Item = &'a [f64]>,
+        untransformed_logp: impl ExactSizeIterator<Item = &'a f64>,
+        params: &'a mut Py<PyAny>,
+    ) -> std::result::Result<(), Self::LogpError> {
+        self.transform_adapter
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transformation adapter specified"))?
+            .update_transformation(
+                rng,
+                untransformed_positions,
+                untransformed_gradients,
+                untransformed_logp,
+                params,
+            )
+            .context("Failed to update the transformation")?;
+        Ok(())
+    }
+
+    fn init_transformation<R: rand::Rng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        untransformed_position: &[f64],
+        untransformed_gradient: &[f64],
+        chain: u64,
+    ) -> std::result::Result<Py<PyAny>, Self::LogpError> {
+        let trafo = self
+            .transform_adapter
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("No transformation adapter specified"))?
+            .new_transformation(rng, untransformed_position, untransformed_gradient, chain)
+            .context("Could not create transformation adapter")?;
+        Ok(trafo)
+    }
+
+    fn new_transformation<R: rand::Rng + ?Sized>(
+        &mut self,
+        _rng: &mut R,
+        _dim: usize,
+        _chain: u64,
+    ) -> std::result::Result<Self::FlowParameters, Self::LogpError> {
+        Python::attach(|py| {
+            let params = PyNone::get(py);
+            Ok(params.unbind().into())
+        })
+    }
+
+    fn transformation_id(&self, params: &Py<PyAny>) -> std::result::Result<i64, Self::LogpError> {
+        let id = self
+            .transform_adapter
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("No transformation adapter specified"))?
+            .transformation_id(params)?;
+        Ok(id)
     }
 }
 
-fn fortran_to_c_order(data: &[f64], shape: &[usize], out: &mut Vec<f64>) {
+fn fortran_to_c_order(data: &[f64], shape: &[u64], out: &mut Vec<f64>) {
     let rank = shape.len();
     let strides = {
-        let mut strides: SmallVec<[usize; 8]> = SmallVec::with_capacity(rank);
-        let mut current: usize = 1;
+        let mut strides: SmallVec<[u64; 8]> = SmallVec::with_capacity(rank);
+        let mut current: u64 = 1;
         for &length in shape.iter() {
             strides.push(current);
             current = current
@@ -281,60 +715,41 @@ fn fortran_to_c_order(data: &[f64], shape: &[usize], out: &mut Vec<f64>) {
         strides
     };
 
-    let mut shape: SmallVec<[usize; 8]> = shape.to_smallvec();
+    let mut shape: SmallVec<[u64; 8]> = shape.to_smallvec();
     shape.reverse();
 
-    let mut idx: SmallVec<[usize; 8]> = shape.iter().map(|_| 0usize).collect();
-    let mut position: usize = 0;
+    let mut idx: SmallVec<[u64; 8]> = shape.iter().map(|_| 0u64).collect();
+    let mut position: u64 = 0;
     'iterate: loop {
-        out.push(data[position]);
+        out.push(data[position as usize]);
 
-        let mut axis: usize = 0;
+        let mut axis: u64 = 0;
         'nextidx: loop {
-            idx[axis] += 1;
-            position += strides[axis];
+            idx[axis as usize] += 1;
+            position += strides[axis as usize];
 
-            if idx[axis] < shape[axis] {
+            if idx[axis as usize] < shape[axis as usize] {
                 break 'nextidx;
             }
 
-            idx[axis] = 0;
-            position -= shape[axis] * strides[axis];
+            idx[axis as usize] = 0;
+            position -= shape[axis as usize] * strides[axis as usize];
             axis += 1;
-            if axis == rank {
+            if axis == rank as u64 {
                 break 'iterate;
             }
         }
     }
 }
 
+/*
 pub struct StanTrace<'model> {
     inner: &'model InnerModel,
     model: &'model StanModel,
     trace: Vec<Vec<f64>>,
     expanded_buffer: Box<[f64]>,
     rng: bridgestan::Rng<&'model bridgestan::StanLibrary>,
-}
-
-impl<'model> Clone for StanTrace<'model> {
-    fn clone(&self) -> Self {
-        // TODO We should avoid this Clone implementation.
-        // We only need it for `StanTrace.inspect`, which
-        // doesn't need rng, so we could avoid this strange
-        // seed of zeros.
-        let rng = self
-            .model
-            .model
-            .new_rng(0)
-            .expect("Could not create stan rng");
-        Self {
-            inner: self.inner,
-            model: self.model,
-            trace: self.trace.clone(),
-            expanded_buffer: self.expanded_buffer.clone(),
-            rng,
-        }
-    }
+    count: usize,
 }
 
 impl<'model> DrawStorage for StanTrace<'model> {
@@ -365,47 +780,20 @@ impl<'model> DrawStorage for StanTrace<'model> {
             // We need to transpose
             fortran_to_c_order(slice, &var.shape, trace);
         }
+        self.count += 1;
         Ok(())
     }
-
-    fn finalize(self) -> anyhow::Result<Arc<dyn Array>> {
-        let (fields, arrays): (Vec<_>, Vec<_>) = izip!(self.trace, &self.model.variables)
-            .map(|(data, variable)| {
-                let data = Float64Array::from(data);
-                let item_field = Arc::new(Field::new("item", DataType::Float64, false));
-                let array = FixedSizeListArray::new(
-                    item_field.clone(),
-                    variable.size as _,
-                    Arc::new(data),
-                    None,
-                );
-                let dtype = DataType::FixedSizeList(item_field, variable.size as i32);
-                let field = Arc::new(Field::new(variable.name.clone(), dtype.clone(), false));
-                let list: Arc<dyn Array> = Arc::new(array);
-                (field, list)
-            })
-            .unzip();
-
-        Ok(Arc::new(
-            StructArray::try_new(fields.into(), arrays, None)
-                .context("Could not create arrow StructArray")?,
-        ))
-    }
-
-    fn inspect(&self) -> anyhow::Result<Arc<dyn Array>> {
-        self.clone().finalize()
-    }
 }
+*/
 
 impl Model for StanModel {
     type Math<'model> = CpuMath<StanDensity<'model>>;
 
-    type DrawStorage<'model, S: nuts_rs::Settings> = StanTrace<'model>;
-
+    /*
     fn new_trace<'a, S: Settings, R: rand::Rng + ?Sized>(
         &'a self,
-        _rng: &mut R,
-        chain: u64,
+        rng: &mut R,
+        _chain: u64,
         settings: &S,
     ) -> anyhow::Result<Self::DrawStorage<'a, S>> {
         let draws = settings.hint_num_tune() + settings.hint_num_draws();
@@ -414,7 +802,8 @@ impl Model for StanModel {
             .iter()
             .map(|var| Vec::with_capacity(var.size * draws))
             .collect();
-        let rng = self.model.new_rng(chain as u32)?;
+        let seed = rng.next_u32();
+        let rng = self.model.new_rng(seed)?;
         let buffer = vec![0f64; self.model.param_num(true, true)];
         Ok(StanTrace {
             model: self,
@@ -422,11 +811,20 @@ impl Model for StanModel {
             trace,
             rng,
             expanded_buffer: buffer.into(),
+            count: 0,
         })
     }
+    */
 
-    fn math(&self) -> anyhow::Result<Self::Math<'_>> {
-        Ok(CpuMath::new(StanDensity(&self.model)))
+    fn math<R: Rng + ?Sized>(&self, rng: &mut R) -> anyhow::Result<Self::Math<'_>> {
+        let rng = self.inner.new_rng(rng.next_u32())?;
+        let num_expanded = self.inner.param_num(true, true);
+        Ok(CpuMath::new(StanDensity {
+            model: &self,
+            rng,
+            transform_adapter: self.transform_adapter.clone(),
+            expanded_buffer: vec![0f64; num_expanded],
+        }))
     }
 
     fn init_position<R: rand::Rng + ?Sized>(
@@ -434,44 +832,44 @@ impl Model for StanModel {
         rng: &mut R,
         position: &mut [f64],
     ) -> anyhow::Result<()> {
-        if let Some(init_point_func) = &self.init_point_func {
-            let seed = rng.next_u64();
-            Python::with_gil(|py| -> anyhow::Result<()> {
-                let random = py.import_bound("numpy.random")?;
-                let rng = random.call_method1("default_rng", (seed,))?;
-                // TODO: pass chain id here too once nuts-rs threads it through Model::init_position
-                let point: PyReadonlyArray1<f64> =
-                    init_point_func
-                        .call1(py, (rng,))?
-                        .extract(py)
-                        .context("init_point_func must return a one-dimensional float64 array")?;
-                let point = point
-                    .as_slice()
-                    .context("init_point_func must return a contiguous float64 array")?;
-                if point.len() != position.len() {
-                    bail!(
-                        "init_point_func returned {} values, expected {}",
-                        point.len(),
-                        position.len()
-                    );
-                }
-                position.copy_from_slice(point);
-                Ok(())
-            })
-            .context("Failed to call init_point_func")?;
+        let Some(init_point_func) = self.init_point_func.as_ref() else {
+            let dist = StandardNormal;
+            dist.sample_iter(rng)
+                .zip(position.iter_mut())
+                .for_each(|(val, pos)| *pos = val);
             return Ok(());
-        }
+        };
 
-        let dist = StandardNormal;
-        dist.sample_iter(rng)
-            .zip(position.iter_mut())
-            .for_each(|(val, pos)| *pos = val);
+        let seed = rng.next_u64();
+
+        Python::attach(|py| {
+            let init_point = init_point_func
+                .call1(py, (seed,))
+                .context("Failed to initialize point")?;
+
+            let init_point: PyReadonlyArray1<f64> = init_point
+                .extract(py)
+                .map_err(|_| anyhow!("Initialization array returned incorrect argument"))?;
+
+            let init_point = init_point
+                .as_slice()
+                .context("Initial point must be contiguous")?;
+
+            if init_point.len() != position.len() {
+                bail!("Initial point has incorrect length");
+            }
+
+            position.copy_from_slice(init_point);
+            Ok(())
+        })?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use itertools::Itertools;
 
     use super::fortran_to_c_order;
@@ -503,7 +901,6 @@ mod tests {
             0., 6., 12., 18., 24., 2., 8., 14., 20., 26., 4., 10., 16., 22., 28., 1., 7., 13., 19.,
             25., 3., 9., 15., 21., 27., 5., 11., 17., 23., 29.,
         ];
-        dbg!(&out);
         assert!(expect.iter().zip_eq(out.iter()).all(|(a, b)| a == b));
 
         let data = vec![
@@ -516,7 +913,6 @@ mod tests {
             0., 6., 12., 18., 24., 2., 8., 14., 20., 26., 4., 10., 16., 22., 28., 1., 7., 13., 19.,
             25., 3., 9., 15., 21., 27., 5., 11., 17., 23., 29.,
         ];
-        dbg!(&out);
         assert!(expect.iter().zip_eq(out.iter()).all(|(a, b)| a == b));
 
         let data = vec![
@@ -529,7 +925,365 @@ mod tests {
             0., 15., 5., 20., 10., 25., 1., 16., 6., 21., 11., 26., 2., 17., 7., 22., 12., 27., 3.,
             18., 8., 23., 13., 28., 4., 19., 9., 24., 14., 29.,
         ];
-        dbg!(&out);
         assert!(expect.iter().zip_eq(out.iter()).all(|(a, b)| a == b));
+    }
+
+    #[test]
+    fn parse_vars() {
+        let mut dims = HashMap::new();
+        let mut dim_sizes = HashMap::new();
+
+        let vars = "";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert!(parsed.len() == 0);
+
+        let vars = "x.1.1,x.2.1,x.3.1,x.1.2,x.2.2,x.3.2";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert!(parsed.len() == 1);
+        let parsed = parsed[0].clone();
+        assert!(parsed.name == "x");
+        assert!(parsed.shape.as_slice() == vec![3, 2]);
+
+        // Incorrect order
+        let vars = "x.1.2,x.1.1,x.2.1,x.2.2,x.3.1,x.3.2";
+        assert!(super::params(vars, &mut dims, &mut dim_sizes).is_err());
+
+        // Incorrect order
+        let vars = "x.1.2.real,x.1.2.imag";
+        assert!(super::params(vars, &mut dims, &mut dim_sizes).is_err());
+
+        let vars = "x.1.1.real,x.1.1.imag,x.2.1.real,x.2.1.imag,x.3.1.real,x.3.1.imag";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert!(parsed.len() == 2);
+        let var = parsed[0].clone();
+        assert!(var.name == "x.real");
+        assert!(var.shape.as_slice() == vec![3, 1]);
+
+        let var = parsed[1].clone();
+        assert!(var.name == "x.imag");
+        assert!(var.shape.as_slice() == vec![3, 1]);
+
+        // Test single variable
+        let vars = "alpha";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let var = &parsed[0];
+        assert_eq!(var.name, "alpha");
+        assert_eq!(var.shape.as_slice(), vec![0; 0]);
+        assert_eq!(var.num_elements, 1);
+
+        // Test multiple scalar variables
+        let vars = "alpha,beta,gamma";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].name, "alpha");
+        assert_eq!(parsed[1].name, "beta");
+        assert_eq!(parsed[2].name, "gamma");
+
+        // Test 1D array
+        let vars = "theta.1,theta.2,theta.3,theta.4";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let var = &parsed[0];
+        assert_eq!(var.name, "theta");
+        assert_eq!(var.shape.as_slice(), vec![4]);
+        assert_eq!(var.num_elements, 4);
+
+        // Test variable name with colons and dots
+        let vars = "x:1:2.4:1.1,x:1:2.4:1.2,x:1:2.4:1.3";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let var = &parsed[0];
+        assert_eq!(var.name, "x:1:2.4:1");
+        assert_eq!(var.shape.as_slice(), vec![3]);
+        assert_eq!(var.num_elements, 3);
+
+        let vars = "
+            a,
+            base,
+            base_i,
+            pair:1,
+            pair:2,
+            nested:1,
+            nested:2:1,
+            nested:2:2.real,
+            nested:2:2.imag,
+            arr_pair.1:1,
+            arr_pair.1:2,
+            arr_pair.2:1,
+            arr_pair.2:2,
+            arr_very_nested.1:1:1,
+            arr_very_nested.1:1:2:1,
+            arr_very_nested.1:1:2:2.real,
+            arr_very_nested.1:1:2:2.imag,
+            arr_very_nested.1:2,
+            arr_very_nested.2:1:1,
+            arr_very_nested.2:1:2:1,
+            arr_very_nested.2:1:2:2.real,
+            arr_very_nested.2:1:2:2.imag,
+            arr_very_nested.2:2,
+            arr_very_nested.3:1:1,
+            arr_very_nested.3:1:2:1,
+            arr_very_nested.3:1:2:2.real,
+            arr_very_nested.3:1:2:2.imag,
+            arr_very_nested.3:2,
+            arr_2d_pair.1.1:1,
+            arr_2d_pair.1.1:2,
+            arr_2d_pair.2.1:1,
+            arr_2d_pair.2.1:2,
+            arr_2d_pair.3.1:1,
+            arr_2d_pair.3.1:2,
+            arr_2d_pair.1.2:1,
+            arr_2d_pair.1.2:2,
+            arr_2d_pair.2.2:1,
+            arr_2d_pair.2.2:2,
+            arr_2d_pair.3.2:1,
+            arr_2d_pair.3.2:2,
+            basep1,
+            basep2,
+            basep3,
+            basep4,
+            basep5,
+            ultimate.1.1:1.1:1,
+            ultimate.1.1:1.1:2.1,
+            ultimate.1.1:1.1:2.2,
+            ultimate.1.1:1.2:1,
+            ultimate.1.1:1.2:2.1,
+            ultimate.1.1:1.2:2.2,
+            ultimate.1.1:2.1.1,
+            ultimate.1.1:2.2.1,
+            ultimate.1.1:2.3.1,
+            ultimate.1.1:2.4.1,
+            ultimate.1.1:2.1.2,
+            ultimate.1.1:2.2.2,
+            ultimate.1.1:2.3.2,
+            ultimate.1.1:2.4.2,
+            ultimate.1.1:2.1.3,
+            ultimate.1.1:2.2.3,
+            ultimate.1.1:2.3.3,
+            ultimate.1.1:2.4.3,
+            ultimate.1.1:2.1.4,
+            ultimate.1.1:2.2.4,
+            ultimate.1.1:2.3.4,
+            ultimate.1.1:2.4.4,
+            ultimate.1.1:2.1.5,
+            ultimate.1.1:2.2.5,
+            ultimate.1.1:2.3.5,
+            ultimate.1.1:2.4.5,
+            ultimate.2.1:1.1:1,
+            ultimate.2.1:1.1:2.1,
+            ultimate.2.1:1.1:2.2,
+            ultimate.2.1:1.2:1,
+            ultimate.2.1:1.2:2.1,
+            ultimate.2.1:1.2:2.2,
+            ultimate.2.1:2.1.1,
+            ultimate.2.1:2.2.1,
+            ultimate.2.1:2.3.1,
+            ultimate.2.1:2.4.1,
+            ultimate.2.1:2.1.2,
+            ultimate.2.1:2.2.2,
+            ultimate.2.1:2.3.2,
+            ultimate.2.1:2.4.2,
+            ultimate.2.1:2.1.3,
+            ultimate.2.1:2.2.3,
+            ultimate.2.1:2.3.3,
+            ultimate.2.1:2.4.3,
+            ultimate.2.1:2.1.4,
+            ultimate.2.1:2.2.4,
+            ultimate.2.1:2.3.4,
+            ultimate.2.1:2.4.4,
+            ultimate.2.1:2.1.5,
+            ultimate.2.1:2.2.5,
+            ultimate.2.1:2.3.5,
+            ultimate.2.1:2.4.5,
+            ultimate.1.2:1.1:1,
+            ultimate.1.2:1.1:2.1,
+            ultimate.1.2:1.1:2.2,
+            ultimate.1.2:1.2:1,
+            ultimate.1.2:1.2:2.1,
+            ultimate.1.2:1.2:2.2,
+            ultimate.1.2:2.1.1,
+            ultimate.1.2:2.2.1,
+            ultimate.1.2:2.3.1,
+            ultimate.1.2:2.4.1,
+            ultimate.1.2:2.1.2,
+            ultimate.1.2:2.2.2,
+            ultimate.1.2:2.3.2,
+            ultimate.1.2:2.4.2,
+            ultimate.1.2:2.1.3,
+            ultimate.1.2:2.2.3,
+            ultimate.1.2:2.3.3,
+            ultimate.1.2:2.4.3,
+            ultimate.1.2:2.1.4,
+            ultimate.1.2:2.2.4,
+            ultimate.1.2:2.3.4,
+            ultimate.1.2:2.4.4,
+            ultimate.1.2:2.1.5,
+            ultimate.1.2:2.2.5,
+            ultimate.1.2:2.3.5,
+            ultimate.1.2:2.4.5,
+            ultimate.2.2:1.1:1,
+            ultimate.2.2:1.1:2.1,
+            ultimate.2.2:1.1:2.2,
+            ultimate.2.2:1.2:1,
+            ultimate.2.2:1.2:2.1,
+            ultimate.2.2:1.2:2.2,
+            ultimate.2.2:2.1.1,
+            ultimate.2.2:2.2.1,
+            ultimate.2.2:2.3.1,
+            ultimate.2.2:2.4.1,
+            ultimate.2.2:2.1.2,
+            ultimate.2.2:2.2.2,
+            ultimate.2.2:2.3.2,
+            ultimate.2.2:2.4.2,
+            ultimate.2.2:2.1.3,
+            ultimate.2.2:2.2.3,
+            ultimate.2.2:2.3.3,
+            ultimate.2.2:2.4.3,
+            ultimate.2.2:2.1.4,
+            ultimate.2.2:2.2.4,
+            ultimate.2.2:2.3.4,
+            ultimate.2.2:2.4.4,
+            ultimate.2.2:2.1.5,
+            ultimate.2.2:2.2.5,
+            ultimate.2.2:2.3.5,
+            ultimate.2.2:2.4.5,
+            ultimate.1.3:1.1:1,
+            ultimate.1.3:1.1:2.1,
+            ultimate.1.3:1.1:2.2,
+            ultimate.1.3:1.2:1,
+            ultimate.1.3:1.2:2.1,
+            ultimate.1.3:1.2:2.2,
+            ultimate.1.3:2.1.1,
+            ultimate.1.3:2.2.1,
+            ultimate.1.3:2.3.1,
+            ultimate.1.3:2.4.1,
+            ultimate.1.3:2.1.2,
+            ultimate.1.3:2.2.2,
+            ultimate.1.3:2.3.2,
+            ultimate.1.3:2.4.2,
+            ultimate.1.3:2.1.3,
+            ultimate.1.3:2.2.3,
+            ultimate.1.3:2.3.3,
+            ultimate.1.3:2.4.3,
+            ultimate.1.3:2.1.4,
+            ultimate.1.3:2.2.4,
+            ultimate.1.3:2.3.4,
+            ultimate.1.3:2.4.4,
+            ultimate.1.3:2.1.5,
+            ultimate.1.3:2.2.5,
+            ultimate.1.3:2.3.5,
+            ultimate.1.3:2.4.5,
+            ultimate.2.3:1.1:1,
+            ultimate.2.3:1.1:2.1,
+            ultimate.2.3:1.1:2.2,
+            ultimate.2.3:1.2:1,
+            ultimate.2.3:1.2:2.1,
+            ultimate.2.3:1.2:2.2,
+            ultimate.2.3:2.1.1,
+            ultimate.2.3:2.2.1,
+            ultimate.2.3:2.3.1,
+            ultimate.2.3:2.4.1,
+            ultimate.2.3:2.1.2,
+            ultimate.2.3:2.2.2,
+            ultimate.2.3:2.3.2,
+            ultimate.2.3:2.4.2,
+            ultimate.2.3:2.1.3,
+            ultimate.2.3:2.2.3,
+            ultimate.2.3:2.3.3,
+            ultimate.2.3:2.4.3,
+            ultimate.2.3:2.1.4,
+            ultimate.2.3:2.2.4,
+            ultimate.2.3:2.3.4,
+            ultimate.2.3:2.4.4,
+            ultimate.2.3:2.1.5,
+            ultimate.2.3:2.2.5,
+            ultimate.2.3:2.3.5,
+            ultimate.2.3:2.4.5
+        ";
+        let parsed = super::params(vars, &mut dims, &mut dim_sizes).unwrap();
+        assert_eq!(parsed[0].name, "a");
+        assert_eq!(parsed[0].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[1].name, "base");
+        assert_eq!(parsed[1].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[2].name, "base_i");
+        assert_eq!(parsed[2].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[3].name, "pair:1");
+        assert_eq!(parsed[3].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[4].name, "pair:2");
+        assert_eq!(parsed[4].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[5].name, "nested:1");
+        assert_eq!(parsed[5].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[6].name, "nested:2:1");
+        assert_eq!(parsed[6].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[7].name, "nested:2:2.real");
+        assert_eq!(parsed[7].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[8].name, "nested:2:2.imag");
+        assert_eq!(parsed[8].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[9].name, "arr_pair.1:1");
+        assert_eq!(parsed[9].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[10].name, "arr_pair.1:2");
+        assert_eq!(parsed[10].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[11].name, "arr_pair.2:1");
+        assert_eq!(parsed[11].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[12].name, "arr_pair.2:2");
+        assert_eq!(parsed[12].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[13].name, "arr_very_nested.1:1:1");
+        assert_eq!(parsed[13].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[14].name, "arr_very_nested.1:1:2:1");
+        assert_eq!(parsed[14].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[15].name, "arr_very_nested.1:1:2:2.real");
+        assert_eq!(parsed[15].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[16].name, "arr_very_nested.1:1:2:2.imag");
+        assert_eq!(parsed[16].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[17].name, "arr_very_nested.1:2");
+        assert_eq!(parsed[17].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[18].name, "arr_very_nested.2:1:1");
+        assert_eq!(parsed[18].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[19].name, "arr_very_nested.2:1:2:1");
+        assert_eq!(parsed[19].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[20].name, "arr_very_nested.2:1:2:2.real");
+        assert_eq!(parsed[20].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[21].name, "arr_very_nested.2:1:2:2.imag");
+        assert_eq!(parsed[21].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[22].name, "arr_very_nested.2:2");
+        assert_eq!(parsed[22].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[23].name, "arr_very_nested.3:1:1");
+        assert_eq!(parsed[23].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[24].name, "arr_very_nested.3:1:2:1");
+        assert_eq!(parsed[24].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[25].name, "arr_very_nested.3:1:2:2.real");
+        assert_eq!(parsed[25].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[26].name, "arr_very_nested.3:1:2:2.imag");
+        assert_eq!(parsed[26].shape.as_slice(), vec![0; 0]);
+
+        assert_eq!(parsed[27].name, "arr_very_nested.3:2");
+        assert_eq!(parsed[27].shape.as_slice(), vec![0; 0]);
     }
 }

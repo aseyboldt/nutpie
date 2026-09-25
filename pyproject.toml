@@ -2,17 +2,12 @@
 requires = ["maturin>=1.1,<2.0"]
 build-backend = "maturin"
 
-[tool.maturin]
-module-name = "nutpie._lib"
-python-source = "python"
-features = ["pyo3/extension-module"]
-
 [project]
 name = "nutpie"
 description = "Sample Stan or PyMC models"
 authors = [{ name = "PyMC Developers", email = "pymc.devs@gmail.com" }]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 classifiers = [
   "Programming Language :: Rust",
@@ -22,65 +17,79 @@ classifiers = [
 
 dependencies = [
   "pyarrow >= 12.0.0",
+  "arro3-core >= 0.6.0",
   "pandas >= 2.0",
-  "xarray >= 2023.06.0",
-  "arviz >= 0.15.0",
+  "platformdirs >= 3.0.0",
+  "xarray >= 2025.01.2",
+  "arviz >= 0.23.0,<2.0",
+  "obstore >= 0.8.0",
+  "zarr >= 3.1.0",
 ]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://pymc-devs.github.io/nutpie/"
+Repository = "https://github.com/pymc-devs/nutpie"
 
 [project.optional-dependencies]
-stan = ["bridgestan >= 2.4.1"]
-pymc = ["pymc >= 5.15.0", "numba >= 0.59.1"]
-pymc-jax = ["pymc >= 5.15.0", "jax >= 0.4.27"]
-all = [
-  "bridgestan >= 2.4.1",
-  "pymc >= 5.15.0",
-  "numba >= 0.59.1",
+stan = ["bridgestan >= 2.7.0", "stanio >= 0.5.1"]
+pymc = ["pymc >= 5.20.1", "numba >= 0.60.0"]
+pymc-jax = ["pymc >= 5.20.1", "jax >= 0.4.27"]
+nnflow = ["flowjax >= 17.1.0", "equinox >= 0.11.12"]
+dev = [
+  "bridgestan >= 2.7.0",
+  "stanio >= 0.5.1",
+  "pymc >= 5.20.1",
+  "numba >= 0.60.0",
   "jax >= 0.4.27",
+  "flowjax >= 17.0.2",
+  "pytest",
+  "pytest-timeout",
+  "pytest-arraydiff",
+]
+all = [
+  "bridgestan >= 2.7.0",
+  "stanio >= 0.5.1",
+  "pymc >= 5.20.1",
+  "numba >= 0.60.0",
+  "jax >= 0.4.27",
+  "flowjax >= 17.1.0",
+  "equinox >= 0.11.12",
+]
+docs = [
+  "bridgestan >= 2.7.0",
+  "stanio >= 0.5.1",
+  "pymc >= 5.20.1",
+  "numba >= 0.60.0",
+  "jax >= 0.4.27",
+  "flowjax >= 17.1.0",
+  "equinox >= 0.11.12",
+  "cmdstanpy >= 1.2.0",
+  "matplotlib >= 3.8.0",
+  "seaborn >= 0.13.0",
+  "jupyter",
 ]
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+target-version = "py312"
 show-fixes = true
 output-format = "full"
-
-[tool.ruff.lint]
-select = [
-  "E",   # pycodestyle errors
-  "W",   # pycodestyle warnings
-  "F",   # Pyflakes
-  "I",   # isort
-  "C4",  # flake8-comprehensions
-  "B",   # flake8-bugbear
-  "UP",  # pyupgrade
-  "RUF", # Ruff-specific rules
-  "TID", # flake8-tidy-imports
-  "BLE", # flake8-blind-except
-  "PTH", # flake8-pathlib
-  "A",   # flake8-builtins
-]
-ignore = [
-  "C408", # unnecessary-collection-call (allow dict(a=1, b=2); clarity over speed!)
-  # The following list is recommended to disable these when using ruff's formatter.
-  # (Not all of the following are actually enabled.)
-  "W191",   # tab-indentation
-  "E111",   # indentation-with-invalid-multiple
-  "E114",   # indentation-with-invalid-multiple-comment
-  "E117",   # over-indented
-  "D206",   # indent-with-spaces
-  "D300",   # triple-single-quotes
-  "Q000",   # bad-quotes-inline-string
-  "Q001",   # bad-quotes-multiline-string
-  "Q002",   # bad-quotes-docstring
-  "Q003",   # avoidable-escaped-quote
-  "COM812", # missing-trailing-comma
-  "COM819", # prohibited-trailing-comma
-  "ISC001", # single-line-implicit-string-concatenation
-  "ISC002", # multi-line-implicit-string-concatenation
-]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
 known-first-party = ["nutpie"]
+
+[tool.maturin]
+module-name = "nutpie._lib"
+python-source = "python"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+markers = [
+  "flow: tests for normalizing flows",
+  "stan: tests for Stan models",
+  "pymc: tests for PyMC models",
+]

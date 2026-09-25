@@ -2,6 +2,627 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.11] - 2026-06-16
+
+### Bug Fixes
+
+- Correct 'Poisond' typo to 'Poisoned' in mutex expect messages (Ben Mares)
+
+
+### Miscellaneous Tasks
+
+- Bump actions/checkout from 6.0.2 to 6.0.3 (dependabot[bot])
+
+- Bump astral-sh/setup-uv from 8.1.0 to 8.2.0 (dependabot[bot])
+
+
+### Security
+
+- Upgrade PyO3 to 0.29 and align ecosystem crates (Ben Mares)
+
+
+### Deps
+
+- Regenerate Cargo.lock for PyO3 0.29 upgrade (Ben Mares)
+
+
+## [0.16.10] - 2026-05-11
+
+### Bug Fixes
+
+- Skip unnecessary transformation_mu in sampled stats (Adrian Seyboldt)
+
+
+### Features
+
+- Add sampler settings attrs in arviz (Adrian Seyboldt)
+
+
+## [0.16.9] - 2026-05-08
+
+### Bug Fixes
+
+- Some typing improvements (Adrian Seyboldt)
+
+- Compat with newer PyTensor and Arviz (Ricardo Vieira)
+
+- Use keys instead of names to identify shared vars (Adrian Seyboldt)
+
+- Add extra groups with datatree.assign for new arviz (Adrian Seyboldt)
+
+
+### Documentation
+
+- Add release process documentation (#292) (Ben Mares)
+
+- Add citation instructions and link to paper (Adrian Seyboldt)
+
+- Add deployment workflow for docs (Adrian Seyboldt)
+
+- Add note that mclmc is experimental (Adrian Seyboldt)
+
+- Add fisher divergence section (Adrian Seyboldt)
+
+- Random webpage copy edits (#307) (Eliot Carlson)
+
+
+### Features
+
+- Cleaner arguments for mass matrix adaptation (Adrian Seyboldt)
+
+- Add user callback for progress info (Adrian Seyboldt)
+
+- Implement compile cache pruning (Adrian Seyboldt)
+
+- Handle string values in trace sample stats (Adrian Seyboldt)
+
+- Expose extra_doubling and exact_normal_trajectory (Adrian Seyboldt)
+
+- Support isokinetic solver (Adrian Seyboldt)
+
+- Support mclmc sampler (Adrian Seyboldt)
+
+- Expose trajectory option (Adrian Seyboldt)
+
+- Add databricks support. closes #218 (#311) (Will Dean)
+
+- Move unconstrained parameters in their own group (Chris Fonnesbeck)
+
+
+### Miscellaneous Tasks
+
+- Bump softprops/action-gh-release from 2 to 3 (dependabot[bot])
+
+- Bump rustls-webpki in the cargo group across 1 directory (dependabot[bot])
+
+- Update dependencies (Adrian Seyboldt)
+
+- Require python 3.12 (Adrian Seyboldt)
+
+- Support both arviz 1.0 and older (Adrian Seyboldt)
+
+- Update nuts-rs (Adrian Seyboldt)
+
+- Dont point pyright to pixi (#304) (Eliot Carlson)
+
+- Bump actions/deploy-pages from 4 to 5 (#309) (dependabot[bot])
+
+- Bump actions/upload-pages-artifact from 3 to 5 (#310) (dependabot[bot])
+
+- Allow low severity issues in github workflow (Adrian Seyboldt)
+
+
+### Refactor
+
+- Cleaner settings handling for nuts (Adrian Seyboldt)
+
+
+### Ci
+
+- Render docs during ci (Adrian Seyboldt)
+
+- Update reference draws due to change in window lengths (Adrian Seyboldt)
+
+- Test against upstream pytensor and pymc for now (aloctavodia)
+
+- Split CI into build + per-suite test jobs (Ricardo Vieira)
+
+- Make sure to use the local wheel to test nutpie (Adrian Seyboldt)
+
+- Fix branch of current dev pymc/pytensor (#312) (Adrian Seyboldt)
+
+- Harden CI workflows a bit (Adrian Seyboldt)
+
+- Move to pymc main for dev testing (Adrian Seyboldt)
+
+
+## [0.16.8] - 2026-03-11
+
+### Documentation
+
+- Fix docstring formatting (Eliot Carlson)
+
+
+### Miscellaneous Tasks
+
+- Bump quinn-proto in the cargo group across 1 directory (dependabot[bot])
+
+
+## [0.16.7] - 2026-03-03
+
+### Bug Fixes
+
+- Limit to arviz < 1.0 (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Update dependencies (Adrian Seyboldt)
+
+- Update github ci actions (Adrian Seyboldt)
+
+
+### Styling
+
+- Update pre-commit ruff version (Adrian Seyboldt)
+
+
+## [0.16.6] - 2026-02-18
+
+### Miscellaneous Tasks
+
+- Bump bytes in the cargo group across 1 directory (dependabot[bot])
+
+- Update dependencies (Adrian Seyboldt)
+
+
+### Testing
+
+- Add test for empty arrays with zarr (Adrian Seyboldt)
+
+
+## [0.16.5] - 2026-02-02
+
+### Bug Fixes
+
+- Compatibility with pandas 3.0 for string coords (Adrian Seyboldt)
+
+- Fix progress display in Marimo (Simon Mutch)
+
+
+### Miscellaneous Tasks
+
+- Update dependencies (Adrian Seyboldt)
+
+- Bump actions/download-artifact from 6 to 7 (dependabot[bot])
+
+- Bump actions/upload-artifact from 5 to 6 (dependabot[bot])
+
+- Require python 3.11 (Adrian Seyboldt)
+
+- Update cargo lock (Adrian Seyboldt)
+
+
+### Testing
+
+- Fix test failure due to numpy datetime representation (Adrian Seyboldt)
+
+
+### Ci
+
+- Update macos github runners (Adrian Seyboldt)
+
+- Test and build with python 3.14 (Adrian Seyboldt)
+
+
+## [0.16.4] - 2025-11-27
+
+### Bug Fixes
+
+- Improve zarr object storage settings (Adrian Seyboldt)
+
+- Don't store zarrs attr in every trace (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Bump actions/checkout from 5 to 6 (dependabot[bot])
+
+- Update nuts-rs to make use of zarr fix (Adrian Seyboldt)
+
+
+## [0.16.3] - 2025-11-13
+
+### Bug Fixes
+
+- Restore maxdepth sampler option (Adrian Seyboldt)
+
+- Silence error messages when sampler is dropped (Adrian Seyboldt)
+
+
+### Features
+
+- Support datetime coordinates (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Bump actions/upload-artifact from 4 to 5 (dependabot[bot])
+
+- Bump actions/download-artifact from 5 to 6 (dependabot[bot])
+
+- Update nuts-rs and other deps (Adrian Seyboldt)
+
+
+## [0.16.2] - 2025-10-22
+
+### Bug Fixes
+
+- Pymc with jax backend was broken with some shapes (Adrian Seyboldt)
+
+- Prevent error message spam on progress error (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Bump astral-sh/setup-uv from 6 to 7 (dependabot[bot])
+
+- Update dependencies (Adrian Seyboldt)
+
+
+## [0.16.1] - 2025-10-10
+
+### Bug Fixes
+
+- Sampler.abort was broken in last release (Adrian Seyboldt)
+
+- Don't store unconstrained_draw if not requested (Adrian Seyboldt)
+
+
+### Features
+
+- Expose step_size_jitter option (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Cargo update (Adrian Seyboldt)
+
+
+## [0.16.0] - 2025-10-09
+
+### Bug Fixes
+
+- Keep python thread handle alive (Adrian Seyboldt)
+
+- No errors for unused parameters (Adrian Seyboldt)
+
+
+### Documentation
+
+- Fix typo in pymc usage docs (Adrian Seyboldt)
+
+
+### Features
+
+- Support step size adaptation method (Adrian Seyboldt)
+
+- Add argument for mindepth (Adrian Seyboldt)
+
+- Support free-threaded python build (Adrian Seyboldt)
+
+- Use new nuts-rs storage interface (Adrian Seyboldt)
+
+- Add zarr_store argument to write trace while sampling (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Bump actions/checkout from 4 to 5 (dependabot[bot])
+
+- Bump actions/download-artifact from 4 to 5 (dependabot[bot])
+
+- Bump actions/setup-python from 5 to 6 (#240) (dependabot[bot])
+
+- Bump actions/attest-build-provenance from 2 to 3 (#239) (dependabot[bot])
+
+- Update pyo3 (Adrian Seyboldt)
+
+
+## [0.15.2] - 2025-07-16
+
+### Features
+
+- Add support for marimo notebooks (#224) (Will Dean)
+
+
+## [0.15.1] - 2025-05-28
+
+### Bug Fixes
+
+- Non-contiguous shared variable (Adrian Seyboldt)
+
+- Allow upper case backend string (Adrian Seyboldt)
+
+- Allow data named x with unfrozen model (Adrian Seyboldt)
+
+
+### Documentation
+
+- Fix call to pm.sample (#216) (Henry Simmons)
+
+
+### Styling
+
+- Fix small typing issue (Adrian Seyboldt)
+
+
+## [0.15.0] - 2025-05-27
+
+### Bug Fixes
+
+- Use stanio for creating Stan's data JSON (#205) (Brian Ward)
+
+- Rng for generated quantities (Adrian Seyboldt)
+
+- Correctly handle tuples in stan traces (Adrian Seyboldt)
+
+- Allow variables with zero shapes (Adrian Seyboldt)
+
+- Let rust sampler decide on default num chains (Adrian Seyboldt)
+
+
+### Documentation
+
+- Fix section links path (Guspan Tanadi)
+
+- Link to website (Adrian Seyboldt)
+
+
+### Features
+
+- Improvements to normalizing flow (Adrian Seyboldt)
+
+- Experiment with planar flows (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Bump pyo3 in the cargo group across 1 directory (dependabot[bot])
+
+- Bump astral-sh/setup-uv from 5 to 6 (#203) (dependabot[bot])
+
+- Add entries to gitignore (Adrian Seyboldt)
+
+- Update dependencies (Adrian Seyboldt)
+
+- Update changelog (Adrian Seyboldt)
+
+
+### Styling
+
+- Fix some clippy warnings (Adrian Seyboldt)
+
+
+### Testing
+
+- Check that normalizing flows are reproducible (Adrian Seyboldt)
+
+- Add low rank tests (Adrian Seyboldt)
+
+
+### Build
+
+- Increase optimization level (Adrian Seyboldt)
+
+
+## [0.14.3] - 2025-03-18
+
+### Bug Fixes
+
+- Fix normalizing flows for 1d posteriors (Adrian Seyboldt)
+
+- Better initialization of masked flows (Adrian Seyboldt)
+
+
+### Documentation
+
+- Fix spelling and grammar (Daniel Saunders)
+
+
+### Features
+
+- Add masked coupling flow (Adrian Seyboldt)
+
+- Expose static trajectory length in nuts (Adrian Seyboldt)
+
+- Make mvscale layer optional (Adrian Seyboldt)
+
+- Add layer norm in normalizing flow (Adrian Seyboldt)
+
+- Small improvements to the masked normalizing flow (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Update dependencies (Adrian Seyboldt)
+
+
+### Ci
+
+- Split some test into sections with optional deps (Adrian Seyboldt)
+
+
+## [0.14.2] - 2025-03-06
+
+### Bug Fixes
+
+- Handle missing flowjax correctly (Adrian Seyboldt)
+
+
+### Testing
+
+- Mark tests as pymc or stan and select in ci (Adrian Seyboldt)
+
+
+### Ci
+
+- Use native arm github action runner (Adrian Seyboldt)
+
+
+## [0.14.1] - 2025-03-05
+
+### Ci
+
+- Update run-on-arch to avoid segfault (Adrian Seyboldt)
+
+- Repare 0.14.1 (Adrian Seyboldt)
+
+
+## [0.14.0] - 2025-03-05
+
+### Bug Fixes
+
+- Set 'make_initial_point_fn' in 'from_pyfunc' to None by default (#175) (Tomás Capretto)
+
+
+### Documentation
+
+- Add nutpie website source (Adrian Seyboldt)
+
+- Include frozen cell output in docs (Adrian Seyboldt)
+
+
+### Features
+
+- Add normalizing flow adaptation (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Bump actions/attest-build-provenance from 1 to 2 (dependabot[bot])
+
+- Bump softprops/action-gh-release from 1 to 2 (dependabot[bot])
+
+- Bump uraimo/run-on-arch-action from 2 to 3 (dependabot[bot])
+
+- Update pre-commit config (Adrian Seyboldt)
+
+
+### Ci
+
+- Run python 3.13 in ci (Adrian Seyboldt)
+
+- Skip slow test on ci if emulating architecture (Adrian Seyboldt)
+
+
+## [0.13.4] - 2025-02-18
+
+### Bug Fixes
+
+- Add lock for pymc init point func (Adrian Seyboldt)
+
+
+### Ci
+
+- Make sure all python versions are available in the builds (Adrian Seyboldt)
+
+- Skip python 3.13 for now (Adrian Seyboldt)
+
+
+## [0.13.3] - 2025-02-12
+
+### Bug Fixes
+
+- Use arrow list with i64 offsets to store trace (Adrian Seyboldt)
+
+- Use i64 offsets in numba backend (Adrian Seyboldt)
+
+- Avoid numpy compatibility warning (Adrian Seyboldt)
+
+- Specify that we currently don't support py313 due to pyo3 (Adrian Seyboldt)
+
+
+### Features
+
+- Add support for pymc sampler initialization (jessegrabowski)
+
+- Use support_point as default init for pymc (Adrian Seyboldt)
+
+- Add option not to store some deterministics (Adrian Seyboldt)
+
+- Add option to freeze pymc models (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Bump uraimo/run-on-arch-action from 2.7.2 to 2.8.1 (dependabot[bot])
+
+- Specify version as dynamic in pyproject (Adrian Seyboldt)
+
+- Update bridgestan (Adrian Seyboldt)
+
+- Update pre-commit versions (Adrian Seyboldt)
+
+
+### Styling
+
+- Reformat some code (Adrian Seyboldt)
+
+
+### Build
+
+- Bump some dependency versions (Adrian Seyboldt)
+
+
+### Ci
+
+- Use ubuntu_latest on aarch64 (Adrian Seyboldt)
+
+- Update CI script using maturin (Adrian Seyboldt)
+
+
+## [0.13.2] - 2024-07-26
+
+### Features
+
+- Support float32 settings in pytensor (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Update dependencies (Adrian Seyboldt)
+
+
+## [0.13.1] - 2024-07-09
+
+### Bug Fixes
+
+- Fix jax backend with non-identifier variable names (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Update dependencies (Adrian Seyboldt)
+
+
+## [0.13.0] - 2024-07-05
+
+### Documentation
+
+- Document low-rank mass matrix parameters (Adrian Seyboldt)
+
+
+### Features
+
+- Add low rank modified mass matrix adaptation (Adrian Seyboldt)
+
+
+### Miscellaneous Tasks
+
+- Remove releases from changelog (Adrian Seyboldt)
+
+
 ## [0.12.0] - 2024-06-29
 
 ### Features
@@ -45,11 +666,6 @@ All notable changes to this project will be documented in this file.
 - Add progress bar on terminal (Adrian Seyboldt)
 
 
-### Miscellaneous Tasks
-
-- Prepare release (Adrian Seyboldt)
-
-
 ## [0.11.0] - 2024-05-29
 
 ### Bug Fixes
@@ -77,8 +693,6 @@ All notable changes to this project will be documented in this file.
 - Update dependencies (Adrian Seyboldt)
 
 - Update python dependencies (Adrian Seyboldt)
-
-- Prepare release (Adrian Seyboldt)
 
 
 ### Refactor
@@ -111,7 +725,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- Mention non-blocking sampling in readme  (Adrian Seyboldt)
+- Mention non-blocking sampling in readme (Adrian Seyboldt)
 
 
 ### Features
@@ -137,7 +751,7 @@ All notable changes to this project will be documented in this file.
 
 - Bump the cargo group across 1 directory with 2 updates (dependabot[bot])
 
-- Some major version bumps in rust deps  (Adrian Seyboldt)
+- Some major version bumps in rust deps (Adrian Seyboldt)
 
 - Bump dependency versions (Adrian Seyboldt)
 
@@ -182,11 +796,15 @@ All notable changes to this project will be documented in this file.
 - Install local nutpie package in all jobs (Adrian Seyboldt)
 
 
+## [0.9.1] - 2023-09-14
+
 ## [0.9.0] - 2023-09-12
 
 ### Bug Fixes
 
 - Better error context for init point errors (Adrian Seyboldt)
+
+- Fix make_initial_point_fn (Max Kochurov)
 
 
 ### Features
@@ -209,6 +827,8 @@ All notable changes to this project will be documented in this file.
 
 - Fix formatting (Adrian Seyboldt)
 
+
+## [0.8.1] - 2023-08-24
 
 ## [0.8.0] - 2023-08-18
 
@@ -277,5 +897,25 @@ All notable changes to this project will be documented in this file.
 
 - Bump version (Adrian Seyboldt)
 
+
+## [0.6.0-beta] - 2023-07-01
+
+## [0.5.1] - 2023-01-03
+
+## [0.5.0] - 2023-01-02
+
+## [0.4.0] - 2022-11-12
+
+## [0.2.1] - 2022-09-02
+
+## [0.2.0] - 2022-09-02
+
+## [0.1.3] - 2022-07-20
+
+## [0.1.2] - 2022-06-29
+
+## [0.1.1] - 2022-06-21
+
+## [0.1.0] - 2022-06-21
 
 <!-- generated by git-cliff -->

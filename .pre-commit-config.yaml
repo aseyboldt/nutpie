@@ -3,21 +3,27 @@ ci:
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v6.0.0
     hooks:
       - id: debug-statements
       - id: check-merge-conflict
-      -   id: check-toml
-      -   id: check-yaml
-      -   id: debug-statements
-      -   id: end-of-file-fixer
-      -   id: no-commit-to-branch
-          args: [--branch, main]
-      -   id: trailing-whitespace
+      - id: check-toml
+      - id: check-yaml
+      - id: debug-statements
+      - id: end-of-file-fixer
+        exclude: "docs/_freeze"
+      - id: no-commit-to-branch
+        args: [--branch, main]
+      - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.4.10
+    rev: v0.16.3
     hooks:
       - id: ruff
         args: ["--fix", "--output-format=full"]
       - id: ruff-format
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.29.0
+    hooks:
+    - id: zizmor
+      args: [--min-severity=medium]

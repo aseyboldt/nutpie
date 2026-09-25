@@ -1,5 +1,9 @@
 # nutpie: A fast sampler for Bayesian posteriors
 
+The `nutpie` package provides a fast NUTS sampler for PyMC and Stan models.
+
+See the [documentation](https://pymc-devs.github.io/nutpie/) for more details.
+
 ## Installation
 
 nutpie can be installed using Conda or Mamba from conda-forge with
@@ -105,7 +109,10 @@ sampler.pause()
 sampler.resume()
 
 # Wait for the sampler to finish (up to timeout seconds)
-# sampler.wait(timeout=0.1)
+sampler.wait(timeout=0.1)
+# Note that not passing any timeout to `wait` will
+# wait until the sampler finishes, then return the InferenceData object:
+idata = sampler.wait()
 
 # or we can also abort the sampler (and return the incomplete trace)
 incomplete_trace = sampler.abort()
@@ -131,7 +138,7 @@ pip install 'nutpie[stan]'
 ```
 
 In addition, a C++ compiler needs to be available. For details see
-[the Stan docs](https://mc-stan.org/docs/cmdstan-guide/cmdstan-installation.html#cpp-toolchain).
+[the Stan docs](https://mc-stan.org/docs/cmdstan-guide/installation.html#cpp-toolchain).
 
 We can then compile a Stan model, and sample using nutpie:
 
