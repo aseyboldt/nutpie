@@ -122,7 +122,8 @@ class CompiledStanModel(CompiledModel):
         """Return a copy that uses ``fn(seed)`` to initialize each chain.
 
         ``seed`` is an integer. The function must return a flat array of
-        unconstrained parameter values.
+        unconstrained parameter values. This overrides any previously
+        configured init callback.
         """
         return replace(self, _init_point_fn=fn).with_data()
 

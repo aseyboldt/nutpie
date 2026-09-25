@@ -235,6 +235,16 @@ class CompiledPyMCModel(CompiledModel):
     def with_transform_adapt(self, **kwargs):
         return dataclasses.replace(self, _transform_adapt_args=kwargs)
 
+    def with_init_point_fn(self, fn: Callable[[SeedType], np.ndarray]):
+        """Return a copy that uses ``fn(seed)`` to initialize each chain.
+
+        ``seed`` is an integer. The function must return a flat array of
+        unconstrained parameter values. This overrides any previously
+        configured init callback (whether the default PyMC-based
+        initialization or a custom one set through this method).
+        """
+        return dataclasses.replace(self, initial_point_func=fn)
+
 
 def update_user_data(user_data, user_data_storage):
     user_data = user_data[()]
