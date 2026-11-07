@@ -813,6 +813,27 @@ def _hierarchical_expected(compiled, n_groups=20):
 
 
 @pytest.mark.pymc
+def test_hessian_points_with_shared_data():
+    pytest.importorskip("jax")
+    import pytensor
+
+    # A raw pytensor.shared (not pm.Data) stays shared data of the compiled model
+    x = pytensor.shared(np.ones(3), name="x_shared")
+    with pm.Model() as model:
+        mu = pm.Normal("mu")
+        pm.Normal("y", mu * x, 1, observed=np.zeros(3))
+
+    compiled = nutpie.compile_pymc_model(
+        model, backend="jax", gradient_backend="jax", freeze_model=False
+    )
+    assert "x_shared" in compiled._shared_data
+    points = compiled._hessian_points(2, 0)
+    assert len(points) == 2
+    compiled = compiled.with_hessian_sparsity(np.eye(compiled.n_dim, dtype=bool))
+    assert compiled.with_factorization().factorization.n_dim == compiled.n_dim
+
+
+@pytest.mark.pymc
 @pytest.mark.flow
 def test_hessian_sparsity_jax():
     compiled = nutpie.compile_pymc_model(

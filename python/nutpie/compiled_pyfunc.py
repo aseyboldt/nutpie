@@ -125,7 +125,7 @@ class PyFuncModel(CompiledModel):
         import jax
 
         def logp(x):
-            return self._raw_logp_fn(x)[0]
+            return self._raw_logp_fn(x, **self._shared_data)[0]
 
         points = self._hessian_points(num_points, seed)
         structural = asdex.hessian_sparsity(logp, points[0])
@@ -158,7 +158,7 @@ class PyFuncModel(CompiledModel):
                 point = rng.uniform(-2, 2, size=self.n_dim)
             else:
                 point = np.asarray(init(int(rng.integers(2**63)), len(points)))
-            if np.isfinite(float(self._raw_logp_fn(point)[0])):
+            if np.isfinite(float(self._raw_logp_fn(point, **self._shared_data)[0])):
                 points.append(point)
         if len(points) < num_points:
             raise ValueError(
@@ -220,7 +220,7 @@ class PyFuncModel(CompiledModel):
         }
 
         def make_adapter(*args, **kwargs):
-            from nutpie.transform_adapter import make_transform_adapter
+            from nutpie.flow_adapter import make_transform_adapter
 
             return make_transform_adapter(**outer_kwargs)(*args, **kwargs)
 
@@ -251,6 +251,8 @@ def from_pyfunc(
     make_initial_point_fn: Callable[[SeedType], np.ndarray] | None = None,
     init_point_layout: tuple[list[str], list[tuple[int, ...]]] | None = None,
     make_transform_adapter=None,
+    # ``raw_logp_fn(x, **shared_data)[0]`` is the log density on the unconstrained
+    # space, used for the Hessian sparsity detection.
     raw_logp_fn=None,
     reparameterized_names=None,
     unconstrained_names: list[str] | None = None,
