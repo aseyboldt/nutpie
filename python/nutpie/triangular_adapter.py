@@ -32,6 +32,9 @@ _LOG_SKIP_TRAINING_VALUE = -3.0
 # Fewest distinct draws a diagonal fit needs; with fewer, it matches them
 # exactly and its scales are arbitrary.
 _MIN_DIAG_DRAWS = 5
+# Fewest training draws a triangular flow fit uses; smaller windows keep the
+# current flow (see `make_transform_adapter`, which rejects such windows).
+MIN_TRAIN_DRAWS = 128
 
 _BIJECTION_TRACE = []
 
@@ -485,7 +488,7 @@ class TriangularFlowAdapter:
             multiple=self._draw_multiple,
             rng=np.random.default_rng(seed),
         )
-        if len(train_idx) < 128:
+        if len(train_idx) < MIN_TRAIN_DRAWS:
             self._report(
                 n_draws,
                 f"keep flow, only {len(train_idx)} draws to train on "

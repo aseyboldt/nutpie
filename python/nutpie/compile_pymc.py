@@ -241,7 +241,7 @@ class CompiledPyMCModel(CompiledModel):
         }
 
         def make_adapter(*args, **kwargs):
-            from nutpie.transform_adapter import make_transform_adapter
+            from nutpie.flow_adapter import make_transform_adapter
 
             return make_transform_adapter(**outer_kwargs)(*args, **kwargs)
 
@@ -526,10 +526,14 @@ def _compile_pymc_model_jax(
     expand_shared_names = [var.name for var in expand_fn_pt.get_shared()]
 
     if gradient_backend == "jax":
-        orig_logp_fn = logp_fn._fun
+        jax_logp_fn = logp_fn._fun
 
         def logp_fn_jax_grad(x, *shared):
-            return jax.value_and_grad(lambda x: orig_logp_fn(x, *shared)[0])(x)
+            return jax.value_and_grad(lambda x: jax_logp_fn(x, *shared)[0])(x)
+
+        def orig_logp_fn(x, **shared):
+            # The raw log density with the model's shared data bound by name.
+            return jax_logp_fn(x, *[shared[name] for name in logp_shared_names])
 
         # static_argnums = list(range(1, len(logp_shared_names) + 1))
         logp_fn_jax_grad = jax.jit(

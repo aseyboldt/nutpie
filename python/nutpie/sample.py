@@ -31,7 +31,7 @@ def _make_transform_adapter(kwargs):
     This imports the flow dependencies and checks the options, so it raises
     for missing packages and invalid options.
     """
-    from nutpie.transform_adapter import make_transform_adapter
+    from nutpie.flow_adapter import make_transform_adapter
 
     return make_transform_adapter(**kwargs)
 
@@ -70,7 +70,7 @@ class CompiledModel:
         """Set the options of the normalizing flow adaptation.
 
         They are used when sampling with ``adaptation="flow"``, see
-        `nutpie.transform_adapter.make_transform_adapter`. Invalid options
+        `nutpie.flow_adapter.make_transform_adapter`. Invalid options
         and missing flow dependencies raise here.
         """
         _make_transform_adapter(kwargs)
